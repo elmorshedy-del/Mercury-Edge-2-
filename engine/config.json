@@ -1,0 +1,38 @@
+{
+  "engine": {
+    "min_bid_cents": 15,
+    "max_spread_cents": 5,
+    "max_size_contracts": 300,
+    "fat_finger_guard_f": 7,
+    "fee_rate": 0.07,
+    "channels": ["dsm", "metar", "sixhr", "omo_floor"]
+  },
+  "cities": {
+    "NYC":  {"icao": "KNYC", "series": "KXHIGHNY",   "dsm_pil": "DSMNYC", "lst_offset_h": -5,
+             "dsm_windows_utc": ["20:15", "21:15"], "metar_minute": 51, "omo": false,
+             "note": "PRIMARY LANE — no sub-hourly public feed; DSM race is open"},
+    "DEN":  {"icao": "KDEN", "series": "KXHIGHDEN",  "dsm_pil": "DSMDEN", "lst_offset_h": -7,
+             "dsm_windows_utc": ["22:15"], "dsm_hourly_sweep": true, "metar_minute": 53, "omo": false,
+             "note": "PRIMARY LANE — verify current DSM cadence (broke Aug 6: hourly->2/day)"},
+    "PHL":  {"icao": "KPHL", "series": "KXHIGHPHIL", "dsm_pil": "DSMPHL", "lst_offset_h": -5,
+             "dsm_windows_utc": ["20:15", "21:15"], "metar_minute": 54, "omo": true,
+             "note": "occupied by a private-sensor actor at touch-moments; race legs still valid"},
+    "MDW":  {"icao": "KMDW", "series": "KXHIGHCHI",  "dsm_pil": "DSMMDW", "lst_offset_h": -6,
+             "dsm_windows_utc": ["21:15", "22:15"], "metar_minute": 53, "omo": true},
+    "AUS":  {"icao": "KAUS", "series": "KXHIGHAUS",  "dsm_pil": "DSMAUS", "lst_offset_h": -6,
+             "dsm_windows_utc": ["21:15", "22:15"], "metar_minute": 53, "omo": true,
+             "note": "extreme-heat tails produced most covered-city harvest"},
+    "MIA":  {"icao": "KMIA", "series": "KXHIGHMIA",  "dsm_pil": "DSMMIA", "lst_offset_h": -5,
+             "dsm_windows_utc": ["20:15", "21:15"], "metar_minute": 53, "omo": true},
+    "LAX":  {"icao": "KLAX", "series": "KXHIGHLAX",  "dsm_pil": "DSMLAX", "lst_offset_h": -8,
+             "dsm_windows_utc": ["23:15", "00:15"], "metar_minute": 53, "omo": true}
+  },
+  "polling": {
+    "dsm_window_halfwidth_s": 90,
+    "dsm_poll_interval_s": 2,
+    "metar_window_s": 300,
+    "metar_poll_interval_s": 5,
+    "omo_poll_interval_s": 60,
+    "idle_interval_s": 30
+  }
+}
