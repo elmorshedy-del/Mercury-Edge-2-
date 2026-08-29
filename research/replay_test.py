@@ -93,15 +93,24 @@ def unit_guards():
     q_ok = lambda tk: (60, 62)
     ev = lambda lvl: ProofEvent("KTST", Date(2026, 8, 24), lvl, "dsm", None,
                                 datetime.now(timezone.utc))
-    # fires once, dedupes on re-proof
+    # fires once, then dedupes after a real intent was emitted
     assert len(eng.on_proof(st, ev(83), b, q_ok)) == 1
     assert len(eng.on_proof(st, ev(84), b, q_ok)) == 0, "dedupe failed"
     # never touches top tails
     st2 = CityState("KTST", "KXTEST")
     assert all("T90" not in i.ticker for i in eng.on_proof(st2, ev(95), b, q_ok))
-    # spread filter (DEN Aug 13 case: bid 34 / ask 64)
+
+    # Regression: a dead bucket with a temporarily thin bid must NOT be marked
+    # fired. The same proven kill must be re-evaluated later and a wide spread
+    # must not block taking a stale resting YES bid.
     st3 = CityState("KTST", "KXTEST")
-    assert len(eng.on_proof(st3, ev(83), b, lambda tk: (34, 64))) == 0, "spread filter failed"
+    assert len(eng.on_proof(st3, ev(83), b, lambda tk: (10, 64))) == 0
+    assert ("KXTEST-B81.5", 83) not in st3.fired, "thin quote was incorrectly made terminal"
+    retry = eng.on_proof(st3, ev(83), b, lambda tk: (34, 64))
+    assert len(retry) == 1, "same-level kill was not retried / wide spread incorrectly blocked"
+    assert retry[0].ticker == "KXTEST-B81.5"
+    assert len(eng.on_proof(st3, ev(83), b, lambda tk: (34, 64))) == 0, "post-intent dedupe failed"
+
     # plausibility guard: DSM claiming far above the METAR-visible max is held,
     # but a big diurnal jump with a consistent METAR reference passes (Denver case)
     st4 = CityState("KTST", "KXTEST")
@@ -119,7 +128,7 @@ def unit_guards():
     dsm_ok = ProofEvent("KTST", Date(2026, 8, 24), 97, "dsm", None,
                         datetime.now(timezone.utc))
     assert len(eng.on_proof(st5, dsm_ok, b5, q_ok)) == 1, "legit DSM blocked"
-    print("  OK — dedupe, top-tail exclusion, spread filter, plausibility guard")
+    print("  OK — dedupe, top-tail exclusion, retryable thin books, wide-spread stale bids, plausibility guard")
 
 if __name__ == "__main__":
     print(_selftest())
