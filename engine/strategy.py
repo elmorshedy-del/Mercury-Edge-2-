@@ -5,7 +5,13 @@ every bucket with kill_level <= L is factually dead. If its bid is still fat,
 sell YES into the resting bids (equivalently buy NO).
 
 Retrospective-only by construction: we act on facts about the past, never on
-trajectory opinions. Top tails are never traded (that's a winner-pick, V2)."""
+trajectory opinions. Top tails are never traded (that's a winner-pick, V2).
+
+Important execution rule: a mathematically dead bucket is evaluated against the
+resting YES bid only. A wide bid/ask spread after the proof is not a reason to
+skip — it can be the stale-bid condition this strategy is designed to capture.
+Thin/empty books are retryable and must not be permanently marked fired.
+"""
 from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
@@ -31,12 +37,14 @@ class CityState:
     series: str
     proven_max: dict = field(default_factory=dict)   # climate_date -> int
     metar_max: dict = field(default_factory=dict)    # climate_date -> int (visible reference)
-    fired: set = field(default_factory=set)          # (ticker, kill_level)
+    fired: set = field(default_factory=set)          # (ticker, kill_level) intents already emitted
 
 class KillEngine:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.min_bid = cfg.get("min_bid_cents", 15)
+        # Kept for config/backward compatibility only. Kill trades intentionally
+        # do not use ask-spread filtering; the stale YES bid is the executable edge.
         self.max_spread = cfg.get("max_spread_cents", 5)
         self.max_size = cfg.get("max_size_contracts", 300)
         self.fat_finger_f = cfg.get("fat_finger_guard_f", 12)
@@ -45,50 +53,64 @@ class KillEngine:
     def on_proof(self, st: CityState, ev: ProofEvent,
                  buckets: list[Bucket],
                  quote_fn) -> list[Intent]:
-        """quote_fn(ticker) -> (bid, ask) cents."""
+        """quote_fn(ticker) -> (bid, ask) cents.
+
+        New higher proofs advance the monotone proven-max ratchet. Equal/lower
+        follow-up proofs still re-check already-dead buckets so a temporary
+        empty/thin book cannot permanently suppress a valid kill trade.
+        """
         if ev.channel not in self.channels:
             return []
-        # keep the METAR-visible reference current (it flows through as proofs)
+
+        # Keep the METAR-visible reference current (it flows through as proofs).
         if ev.channel in ("metar", "sixhr"):
             if ev.level_f > st.metar_max.get(ev.climate_date, -999):
                 st.metar_max[ev.climate_date] = ev.level_f
+
         cur = st.proven_max.get(ev.climate_date, -999)
-        if ev.level_f <= cur:
+        if ev.level_f > cur:
+            # Physical-plausibility guard: a DSM/OMO claim can never exceed the
+            # day's METAR-visible max by more than the invisible-gap bound.
+            ref = st.metar_max.get(ev.climate_date)
+            if (ev.channel in ("dsm", "omo_floor") and ref is not None
+                    and ev.level_f > ref + self.fat_finger_f):
+                log.error("GUARD: %s %s claims %sF via %s but METAR-visible max is %sF "
+                          "(+%d limit) — held for confirmation",
+                          ev.station, ev.climate_date, ev.level_f, ev.channel, ref,
+                          self.fat_finger_f)
+                return []
+            st.proven_max[ev.climate_date] = ev.level_f
+            proven = ev.level_f
+        else:
+            # Retry already-proven dead buckets on subsequent proof traffic.
+            proven = cur
+
+        if proven == -999:
             return []
-        # Physical-plausibility guard: a DSM/OMO claim can never exceed the day's
-        # METAR-visible max by more than the invisible-gap bound (measured <=4F;
-        # we allow fat_finger_guard_f). Big diurnal jumps vs a stale morning max
-        # are NORMAL (Denver +21F) — so we guard against the live reference, not
-        # against the previous proof.
-        ref = st.metar_max.get(ev.climate_date)
-        if (ev.channel in ("dsm", "omo_floor") and ref is not None
-                and ev.level_f > ref + self.fat_finger_f):
-            log.error("GUARD: %s %s claims %sF via %s but METAR-visible max is %sF "
-                      "(+%d limit) — held for confirmation",
-                      ev.station, ev.climate_date, ev.level_f, ev.channel, ref,
-                      self.fat_finger_f)
-            return []
-        st.proven_max[ev.climate_date] = ev.level_f
+
         intents = []
         for b in buckets:
             kl = b.kill_level
-            if kl is None or kl > ev.level_f:
+            if kl is None or kl > proven:
                 continue
             key = (b.ticker, kl)
             if key in st.fired:
                 continue
+
             bid, ask = quote_fn(b.ticker)
             if bid is None or bid < self.min_bid:
-                st.fired.add(key)          # dead-or-thin: don't revisit
+                # Retry later. Do NOT mark fired: a stale bid can reappear or
+                # become executable after this transient quote snapshot.
+                log.info("kill pending: %s proven_dead_at=%sF bid=%s (<%sc); retry",
+                         b.ticker, proven, bid, self.min_bid)
                 continue
-            if ask is not None and (ask - bid) > self.max_spread:
-                log.warning("spread filter: %s bid=%s ask=%s — skip", b.ticker, bid, ask)
-                st.fired.add(key)
-                continue
+
+            # Do not apply an ask-spread filter to factual kills. A dislocated
+            # ask with an old resting YES bid is exactly the stale-liquidity edge.
             st.fired.add(key)
             intents.append(Intent(
                 ts=datetime.now(timezone.utc), ticker=b.ticker, action="SELL_YES",
-                reason=f"proof {ev.channel}: max>={ev.level_f}F kills [{b.subtitle}] "
+                reason=f"proof {ev.channel}: max>={proven}F kills [{b.subtitle}] "
                        f"(kill_level {kl}); bid {bid}c",
                 proof=ev, min_px=max(self.min_bid, bid - 8), max_size=self.max_size))
             log.info("INTENT %s %s | %s", b.ticker, f"bid={bid}", intents[-1].reason)
