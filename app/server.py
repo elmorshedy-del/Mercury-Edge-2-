@@ -184,6 +184,12 @@ def api_depth():
     last = json.loads(lines[-1]) if lines else None
     return {"rows": len(lines), "last_ts": last["ts"] if last else None}
 
+@app.get("/api/audit/missed-kills")
+def api_audit_missed_kills():
+    """Read-only replay of the original zero-paper-trade bug period."""
+    from research.missed_kill_audit import audit
+    return audit(DATA, CFG)
+
 @app.get("/api/census")
 def api_census():
     if os.path.exists(CENSUS):
