@@ -4,6 +4,7 @@ from __future__ import annotations
 import json, os, sys, time, threading
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from typing import Optional
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "engine"))
@@ -13,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import journal, runtime
 from market import board, quote, orderbook_yes_bids
+from research.history_query import query_jsonl
 
 DATA = journal.DATA_DIR
 LEDGER = os.path.join(DATA, "paper_ledger.jsonl")
@@ -189,6 +191,26 @@ def api_audit_missed_kills():
     """Read-only replay of the original zero-paper-trade bug period."""
     from research.missed_kill_audit import audit
     return audit(DATA, CFG)
+
+@app.get("/api/research/events")
+def api_research_events(start: str, end: str, city: Optional[str] = None,
+                        channel: Optional[str] = None, kind: Optional[str] = None,
+                        ticker: Optional[str] = None, limit: int = 1000):
+    """Bounded read-only query over the persisted event journal."""
+    try:
+        return query_jsonl(os.path.join(DATA, "events.jsonl"), start, end, limit,
+                           city=city, channel=channel, kind=kind, ticker=ticker)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+@app.get("/api/research/depth")
+def api_research_depth(start: str, end: str, ticker: Optional[str] = None,
+                       limit: int = 1000):
+    """Bounded read-only query over persisted order-book snapshots."""
+    try:
+        return query_jsonl(DEPTH, start, end, limit, ticker=ticker)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.get("/api/census")
 def api_census():
