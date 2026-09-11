@@ -187,10 +187,17 @@ def api_depth():
     return {"rows": len(lines), "last_ts": last["ts"] if last else None}
 
 @app.get("/api/audit/missed-kills")
-def api_audit_missed_kills():
-    """Read-only replay of the original zero-paper-trade bug period."""
+def api_audit_missed_kills(start: Optional[str] = None, end: Optional[str] = None,
+                           max_snapshot_age_s: int = 240):
+    """Read-only replay of persisted kill opportunities over an optional window."""
     from research.missed_kill_audit import audit
-    return audit(DATA, CFG)
+    return audit(
+        DATA,
+        CFG,
+        start_iso=start or "2026-08-25T12:46:00+00:00",
+        end_iso=end or "2026-08-29T19:37:00+00:00",
+        max_snapshot_age_s=max_snapshot_age_s,
+    )
 
 @app.get("/api/research/events")
 def api_research_events(start: str, end: str, city: Optional[str] = None,
