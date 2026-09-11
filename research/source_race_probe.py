@@ -4,12 +4,13 @@ Run from repository root:
     PYTHONPATH=engine python research/source_race_probe.py
 
 It NEVER places orders. Every ProofEvent emitted by public workers OR by the
-local push bus (LDM/NWWS/FAA adapters) is appended to source_race.jsonl. This
-lets us compare identical observations/products by actual first-seen time.
+local push bus (LDM/NWWS/FAA adapters) is appended to source_race.jsonl. A
+credential-free network worker simultaneously records DNS/TCP/TLS timing to
+Kalshi and weather endpoints in network_race.jsonl.
 
-The first fetch from several sources contains historical/backfill observations.
-Those records are retained for diagnostics but explicitly tagged ``warm_start``
-so they cannot be mistaken for live publication latency.
+The first fetch from several weather sources contains historical/backfill
+observations. Those records are retained but tagged ``warm_start`` so they are
+never mistaken for live publication latency.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "engine"))
 
 from fast_sources import SourceRace  # noqa: E402
+from network_probe import NetworkProbeWorker  # noqa: E402
 from proof_bus import ProofBusReceiver  # noqa: E402
 
 CFG = json.load(open(ROOT / "engine" / "config.json"))
@@ -37,6 +39,7 @@ WARM_START_S = float(os.environ.get("MERCURY_PROBE_WARM_START_S", "30"))
 race = SourceRace(CFG)
 stop = threading.Event()
 bus = ProofBusReceiver(race.push, stop)
+network = NetworkProbeWorker(stop, DATA)
 running = True
 started_wall = datetime.now(timezone.utc)
 started_mono = time.monotonic()
@@ -52,13 +55,13 @@ def _stop(*_):
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 
-# Bind the push socket before public workers. External LDM/NWWS/FAA adapters can
-# then race the HTTP sources into exactly the same queue.
+# Bind push ingress before public workers so direct feeds can race immediately.
 threading.Thread(target=bus.run, daemon=True, name="proof-bus").start()
+threading.Thread(target=network.run, daemon=True, name="network-probe").start()
 race.start()
 print(
     f"source-race shadow started -> {OUT}; proof bus={bus.path}; "
-    f"warm_start={WARM_START_S:.0f}s",
+    f"warm_start={WARM_START_S:.0f}s; network={network.path}",
     flush=True,
 )
 
