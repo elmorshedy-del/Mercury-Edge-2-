@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import os
 import sys
 import unittest
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import date as Date, datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "engine"))
 
-from fast_kalshi import KalshiBookCache  # noqa: E402
+from dsm_decode import parse_dsm_line  # noqa: E402
+from fast_kalshi import KalshiBookCache, kill_client_order_id  # noqa: E402
 from fast_sources import _metar_obs_time, parse_metar_proofs  # noqa: E402
+from feeds import ProofEvent  # noqa: E402
+from proof_bus import dict_to_event, event_to_dict  # noqa: E402
+from strategy import Intent  # noqa: E402
 
 
 class FakeSigner:
@@ -35,6 +37,16 @@ class FastSourceTests(unittest.TestCase):
         levels = {e.channel: e.level_f for e in evs}
         self.assertEqual(levels["metar"], 68)
         self.assertEqual(levels["sixhr"], 72)
+
+    def test_dsm_decoder(self):
+        seen = datetime(2026, 9, 11, 21, 16, tzinfo=timezone.utc)
+        ev = parse_dsm_line("KNYC DS 2115 11/09 0811450/ /", "KNYC", -5,
+                            "unit-dsm", seen)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.level_f, 81)
+        self.assertEqual(ev.climate_date, Date(2026, 9, 11))
+        self.assertEqual(ev.channel, "dsm")
+        self.assertTrue(ev.detail.startswith("unit-dsm"))
 
 
 class BookCacheTests(unittest.TestCase):
@@ -68,6 +80,37 @@ class BookCacheTests(unittest.TestCase):
             "no_dollars_fp": [],
         })
         self.assertEqual(self.book.yes_levels("TEST")[0], (31.0, 2.0))
+
+
+class IdempotencyAndBusTests(unittest.TestCase):
+    @staticmethod
+    def _intent(ticker: str) -> Intent:
+        ev = ProofEvent(
+            station="KNYC",
+            climate_date=Date(2026, 9, 11),
+            level_f=81,
+            channel="dsm",
+            obs_ts=datetime(2026, 9, 11, 20, 0, tzinfo=timezone.utc),
+            seen_ts=datetime(2026, 9, 11, 20, 0, 1, tzinfo=timezone.utc),
+            detail="unit",
+        )
+        return Intent(
+            ts=datetime.now(timezone.utc), ticker=ticker, action="SELL_YES",
+            reason="unit", proof=ev, min_px=15, max_size=300,
+        )
+
+    def test_kill_client_order_id_is_stable_and_market_specific(self):
+        a1 = kill_client_order_id(self._intent("KXHIGHNY-26SEP11-T80"))
+        a2 = kill_client_order_id(self._intent("KXHIGHNY-26SEP11-T80"))
+        b = kill_client_order_id(self._intent("KXHIGHNY-26SEP11-T82"))
+        self.assertEqual(a1, a2)
+        self.assertNotEqual(a1, b)
+        self.assertTrue(a1.startswith("mk-"))
+
+    def test_proof_bus_serialization_round_trip(self):
+        ev = self._intent("KXHIGHNY-26SEP11-T80").proof
+        restored = dict_to_event(event_to_dict(ev))
+        self.assertEqual(restored, ev)
 
 
 if __name__ == "__main__":
