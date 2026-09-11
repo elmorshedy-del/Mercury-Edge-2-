@@ -7,12 +7,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "engine"))
+sys.path.insert(0, str(ROOT / "research"))
 
-from dsm_decode import parse_dsm_line  # noqa: E402
+from dsm_decode import parse_dsm_line, parse_dsm_text  # noqa: E402
 from fast_kalshi import KalshiBookCache, kill_client_order_id  # noqa: E402
 from fast_sources import _metar_obs_time, parse_metar_proofs  # noqa: E402
 from feeds import ProofEvent  # noqa: E402
 from proof_bus import dict_to_event, event_to_dict  # noqa: E402
+from source_race_report import build_report  # noqa: E402
 from strategy import Intent  # noqa: E402
 
 
@@ -47,6 +49,21 @@ class FastSourceTests(unittest.TestCase):
         self.assertEqual(ev.climate_date, Date(2026, 9, 11))
         self.assertEqual(ev.channel, "dsm")
         self.assertTrue(ev.detail.startswith("unit-dsm"))
+
+    def test_collective_dsm_decoder_selects_configured_stations(self):
+        seen = datetime(2026, 9, 11, 21, 16, tzinfo=timezone.utc)
+        text = (
+            "CDUS27 KZNY 112116\n"
+            "KNYC DS 2115 11/09 0811450/ /\n"
+            "KPHL DS 2115 11/09 821500/ /\n"
+            "KEWR DS 2115 11/09 831501/ /\n"
+        )
+        cfg = {
+            "NYC": {"icao": "KNYC", "lst_offset_h": -5},
+            "PHL": {"icao": "KPHL", "lst_offset_h": -5},
+        }
+        evs = parse_dsm_text(text, cfg, "collective", seen)
+        self.assertEqual({e.station for e in evs}, {"KNYC", "KPHL"})
 
 
 class BookCacheTests(unittest.TestCase):
@@ -111,6 +128,37 @@ class IdempotencyAndBusTests(unittest.TestCase):
         ev = self._intent("KXHIGHNY-26SEP11-T80").proof
         restored = dict_to_event(event_to_dict(ev))
         self.assertEqual(restored, ev)
+
+
+class SourceRaceReportTests(unittest.TestCase):
+    @staticmethod
+    def _row(source: str, seen: str, warm: bool, lag_ms: float) -> dict:
+        return {
+            "station": "KMIA", "obs_ts": "2026-09-11T20:27:00+00:00",
+            "channel": "metar", "level_f": 88, "source": source,
+            "seen_ts": seen, "warm_start": warm, "obs_to_seen_ms": lag_ms,
+            "detail": f"{source} unit http=20.0ms",
+        }
+
+    def test_left_censored_winner_is_not_counted_as_exact(self):
+        rows = [
+            self._row("tgftp", "2026-09-11T20:30:06+00:00", True, 186000),
+            self._row("aviationweather", "2026-09-11T20:31:06+00:00", False, 246000),
+        ]
+        r = build_report(rows)
+        self.assertEqual(r["exact_source_wins"], {})
+        self.assertEqual(len(r["left_censored_races"]), 1)
+        self.assertEqual(r["left_censored_races"][0]["gap_ms"], 60000.0)
+
+    def test_fresh_race_counts_exact_winner(self):
+        rows = [
+            self._row("tgftp", "2026-09-11T20:30:10+00:00", False, 190000),
+            self._row("aviationweather", "2026-09-11T20:30:13+00:00", False, 193000),
+        ]
+        r = build_report(rows)
+        self.assertEqual(r["exact_source_wins"], {"tgftp": 1})
+        self.assertEqual(r["exact_pairwise"]["tgftp>aviationweather"]["median_lead_ms"],
+                         3000.0)
 
 
 if __name__ == "__main__":
