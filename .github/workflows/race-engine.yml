@@ -1,0 +1,30 @@
+name: Race engine checks
+
+on:
+  push:
+    branches:
+      - feature/ultra-low-latency-race-engine
+  pull_request:
+    paths:
+      - 'engine/**'
+      - 'research/source_race_*.py'
+      - 'tests/test_*.py'
+      - 'requirements.txt'
+      - '.github/workflows/race-engine.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q engine research tests
+      - name: Decode self-test
+        run: PYTHONPATH=engine python engine/decode.py
+      - name: Race engine tests
+        run: PYTHONPATH=engine:research python -m unittest discover -s tests -p 'test_*.py' -v
