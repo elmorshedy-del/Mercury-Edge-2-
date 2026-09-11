@@ -3,10 +3,9 @@
 Run from repository root:
     PYTHONPATH=engine python research/source_race_probe.py
 
-It NEVER places orders. Every ProofEvent emitted by fast_sources is appended to
-/data/source_race.jsonl (or WEATHERBOT_DATA_DIR). This lets us compare the same
-observation across TGFTP, AviationWeather, MADIS HF and IEM DSM by actual
-first-seen time instead of guessing from provider documentation.
+It NEVER places orders. Every ProofEvent emitted by public workers OR by the
+local push bus (LDM/NWWS/FAA adapters) is appended to source_race.jsonl. This
+lets us compare identical observations/products by actual first-seen time.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "engine"))
 
 from fast_sources import SourceRace  # noqa: E402
+from proof_bus import ProofBusReceiver  # noqa: E402
 
 CFG = json.load(open(ROOT / "engine" / "config.json"))
 DATA = Path(os.environ.get("WEATHERBOT_DATA_DIR", "/data"))
@@ -29,20 +30,26 @@ DATA.mkdir(parents=True, exist_ok=True)
 OUT = DATA / "source_race.jsonl"
 
 race = SourceRace(CFG)
+stop = threading.Event()
+bus = ProofBusReceiver(race.push, stop)
 running = True
 
 
 def _stop(*_):
     global running
     running = False
+    stop.set()
     race.close()
 
 
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 
+# Bind the push socket before public workers. External LDM/NWWS/FAA adapters can
+# then race the HTTP sources into exactly the same queue.
+threading.Thread(target=bus.run, daemon=True, name="proof-bus").start()
 race.start()
-print(f"source-race shadow started -> {OUT}", flush=True)
+print(f"source-race shadow started -> {OUT}; proof bus={bus.path}", flush=True)
 
 while running:
     try:
