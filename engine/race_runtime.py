@@ -29,7 +29,7 @@ import journal
 from fast_kalshi import BOOK, EXECUTOR
 from fast_sources import SourceRace
 from market import Bucket, board
-from strategy import CityState, Intent, KillEngine
+from strategy import CityState, KillEngine
 
 log = logging.getLogger("race_runtime")
 HERE = Path(__file__).resolve().parent
@@ -71,9 +71,50 @@ class RaceRuntime:
         self.live = (os.getenv("MERCURY_RACE_LIVE") == "yes"
                      and os.getenv("WEATHERBOT_LIVE") == "yes")
         self._tickers: list[str] = []
+        mode = "live" if self.live else "shadow"
+        self.state_path = Path(journal.DATA_DIR) / f"race_state_{mode}.json"
+
+    def _restore(self) -> None:
+        if not self.state_path.exists():
+            return
+        try:
+            blob = json.loads(self.state_path.read_text())
+        except Exception as exc:
+            log.warning("race state restore failed: %s", exc)
+            return
+        for city in self.cities.values():
+            raw = blob.get(city.key)
+            if not raw:
+                continue
+            city.state.proven_max = {
+                Date.fromisoformat(k): int(v) for k, v in raw.get("proven", {}).items()
+            }
+            city.state.metar_max = {
+                Date.fromisoformat(k): int(v) for k, v in raw.get("metar", {}).items()
+            }
+            city.state.fired = {tuple(x) for x in raw.get("fired", [])}
+
+    def _persist(self) -> None:
+        """Persist only after the critical send path; atomic replace on restart state."""
+        blob = {
+            city.key: {
+                "proven": {str(k): v for k, v in city.state.proven_max.items()},
+                "metar": {str(k): v for k, v in city.state.metar_max.items()},
+                "fired": [list(x) for x in city.state.fired],
+            }
+            for city in self.cities.values()
+        }
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(blob, separators=(",", ":")))
+            os.replace(tmp, self.state_path)
+        except Exception as exc:
+            log.warning("race state persist failed: %s", exc)
 
     def prepare(self) -> None:
         """Do all slow work before weather can trigger a trade."""
+        self._restore()
         tickers: list[str] = []
         for city in self.cities.values():
             bs = city.load_board()
@@ -99,6 +140,18 @@ class RaceRuntime:
     def _quote(self, ticker: str):
         return BOOK.quote(ticker)
 
+    @staticmethod
+    def _unfire(city: RaceCity, ticker: str) -> None:
+        """Allow retry after an order request that definitely/ambiguously failed.
+
+        The order's deterministic client_order_id protects against duplicate fills
+        if an HTTP timeout actually occurred after Kalshi accepted the first send.
+        """
+        for b in city.buckets or []:
+            if b.ticker == ticker and b.kill_level is not None:
+                city.state.fired.discard((b.ticker, b.kill_level))
+                return
+
     def _handle(self, ev) -> None:
         city = self.cities.get(ev.station)
         if city is None or ev.climate_date != city.climate_today():
@@ -111,9 +164,16 @@ class RaceRuntime:
 
         for intent in intents:
             result = {"mode": "SHADOW"}
+            error = None
             t_submit_start_ns = time.perf_counter_ns()
             if self.live:
-                result = EXECUTOR.execute(intent)
+                try:
+                    result = EXECUTOR.execute(intent)
+                except Exception as exc:
+                    # Do not permanently suppress this mathematically dead bucket.
+                    # Later proof traffic may retry with the same idempotency key.
+                    self._unfire(city, intent.ticker)
+                    error = f"{type(exc).__name__}: {exc}"
             t_submit_done_ns = time.perf_counter_ns()
 
             # Everything below is deliberately after the order-send attempt.
@@ -133,9 +193,11 @@ class RaceRuntime:
                 decision_us=round((t_decision_ns - t_received_ns) / 1000, 1),
                 submit_us=round((t_submit_done_ns - t_submit_start_ns) / 1000, 1),
                 result_latency=(result.get("_mercury_latency_ms") if isinstance(result, dict) else None),
+                result_mode=(result.get("mode") if isinstance(result, dict) else None),
+                error=error,
             )
 
-        # Proof journaling is also off the critical path.
+        # Proof journaling + state persistence are off the critical path.
         journal.emit(
             "race_proof",
             city=city.key,
@@ -149,6 +211,7 @@ class RaceRuntime:
             decision_us=round((t_decision_ns - t_received_ns) / 1000, 1),
             intents=len(intents),
         )
+        self._persist()
 
     def run(self) -> None:
         self.prepare()
@@ -166,6 +229,7 @@ class RaceRuntime:
         self.stop.set()
         self.sources.close()
         BOOK.stop()
+        self._persist()
 
 
 def main() -> None:
