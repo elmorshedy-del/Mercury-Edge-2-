@@ -182,6 +182,10 @@ class KalshiBookCache:
                         "params": {
                             "channels": ["orderbook_delta"],
                             "market_tickers": sorted(self._tickers),
+                            # Keep the currently documented legacy orderbook scale
+                            # explicit: no-side levels are NO prices. Strategy only
+                            # requires YES bids, but quote() also derives YES ask.
+                            "use_yes_price": False,
                         },
                     }, separators=(",", ":")))
                     self.connected = True
@@ -235,7 +239,8 @@ class FastRestExecutor:
             return {"mode": "DISABLED", "ticker": intent.ticker}
 
         # V2 event-order API quotes the YES leg directly. Asking YES at min_px is
-        # equivalent to buying NO at 1-min_px and consumes resting YES bids.
+        # economically equivalent to buying NO at 1-min_px and consumes resting
+        # YES bids at min_px or better.
         body = {
             "ticker": intent.ticker,
             "client_order_id": f"mercury-{time.time_ns()}",
