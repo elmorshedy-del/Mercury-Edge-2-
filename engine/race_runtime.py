@@ -7,8 +7,9 @@ Critical-path rules:
 1. boards are loaded before the race;
 2. Kalshi order books are streamed into RAM before weather arrives;
 3. weather sources run independently and race into one queue;
-4. a proof performs only in-memory strategy work, then sends the order;
-5. logging/persistence happens after the order submission attempt.
+4. privileged push feeds enter the same queue over a local UNIX datagram bus;
+5. a proof performs only in-memory strategy work, then sends the order;
+6. logging/persistence happens after the order submission attempt.
 
 By default this runtime is SHADOW ONLY. Set MERCURY_RACE_LIVE=yes in addition to
 WEATHERBOT_LIVE=yes and valid Kalshi credentials to permit live submission.
@@ -29,6 +30,7 @@ import journal
 from fast_kalshi import BOOK, EXECUTOR
 from fast_sources import SourceRace
 from market import Bucket, board
+from proof_bus import ProofBusReceiver
 from strategy import CityState, KillEngine
 
 log = logging.getLogger("race_runtime")
@@ -68,6 +70,8 @@ class RaceRuntime:
             for k, c in CFG["cities"].items()
         }
         self.sources = SourceRace(CFG)
+        self.proof_bus = ProofBusReceiver(self.sources.push, self.stop)
+        self.proof_bus_thread: threading.Thread | None = None
         self.live = (os.getenv("MERCURY_RACE_LIVE") == "yes"
                      and os.getenv("WEATHERBOT_LIVE") == "yes")
         self._tickers: list[str] = []
@@ -131,10 +135,16 @@ class RaceRuntime:
         else:
             log.warning("Kalshi credentials absent; orderbook WebSocket disabled")
 
+        # Bind the local proof bus before starting any source workers. External
+        # LDM/NWWS/FAA decoders can then push immediately without file polling.
+        self.proof_bus_thread = threading.Thread(
+            target=self.proof_bus.run, daemon=True, name="proof-bus"
+        )
+        self.proof_bus_thread.start()
         self.sources.start()
         journal.emit("system", msg=(
             f"race runtime started live={self.live} tickers={len(self._tickers)} "
-            f"kalshi_ws={BOOK.connected}"
+            f"kalshi_ws={BOOK.connected} proof_bus={self.proof_bus.path}"
         ))
 
     def _quote(self, ticker: str):
@@ -142,11 +152,6 @@ class RaceRuntime:
 
     @staticmethod
     def _unfire(city: RaceCity, ticker: str) -> None:
-        """Allow retry after an order request that definitely/ambiguously failed.
-
-        The order's deterministic client_order_id protects against duplicate fills
-        if an HTTP timeout actually occurred after Kalshi accepted the first send.
-        """
         for b in city.buckets or []:
             if b.ticker == ticker and b.kill_level is not None:
                 city.state.fired.discard((b.ticker, b.kill_level))
@@ -158,7 +163,7 @@ class RaceRuntime:
             return
 
         t_received_ns = time.perf_counter_ns()
-        buckets = city.load_board()  # cache hit on normal critical path
+        buckets = city.load_board()
         intents = self.engine.on_proof(city.state, ev, buckets, self._quote)
         t_decision_ns = time.perf_counter_ns()
 
@@ -170,13 +175,10 @@ class RaceRuntime:
                 try:
                     result = EXECUTOR.execute(intent)
                 except Exception as exc:
-                    # Do not permanently suppress this mathematically dead bucket.
-                    # Later proof traffic may retry with the same idempotency key.
                     self._unfire(city, intent.ticker)
                     error = f"{type(exc).__name__}: {exc}"
             t_submit_done_ns = time.perf_counter_ns()
 
-            # Everything below is deliberately after the order-send attempt.
             journal.emit(
                 "race_intent",
                 city=city.key,
@@ -197,7 +199,6 @@ class RaceRuntime:
                 error=error,
             )
 
-        # Proof journaling + state persistence are off the critical path.
         journal.emit(
             "race_proof",
             city=city.key,
