@@ -16,13 +16,14 @@ same ProofEvent objects into the queue without changing strategy code.
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import os
 import queue
 import re
 import threading
 import time
-from datetime import datetime, timedelta, timezone, date as Date
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import httpx
@@ -35,22 +36,30 @@ log = logging.getLogger("fast_sources")
 METAR_TS = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
 
 
+def _month_shift(dt: datetime, delta: int) -> tuple[int, int]:
+    n = dt.year * 12 + (dt.month - 1) + delta
+    return n // 12, n % 12 + 1
+
+
 def _metar_obs_time(raw: str, now: datetime) -> datetime | None:
+    """Resolve DDHHMMZ robustly across month/year boundaries.
+
+    METAR has no month field. Build valid candidates in previous/current/next
+    month and select the one nearest ``now`` instead of subtracting a fixed
+    number of days.
+    """
     m = METAR_TS.search(raw)
     if not m:
         return None
     day, hh, mm = map(int, m.groups())
-    try:
-        obs = now.replace(day=day, hour=hh, minute=mm, second=0, microsecond=0)
-    except ValueError:
+    candidates: list[datetime] = []
+    for delta in (-1, 0, 1):
+        y, mon = _month_shift(now, delta)
+        if day <= calendar.monthrange(y, mon)[1]:
+            candidates.append(datetime(y, mon, day, hh, mm, tzinfo=timezone.utc))
+    if not candidates:
         return None
-    # Existing Mercury convention for month rollover; observations are only
-    # queried over a very short recent horizon.
-    if obs > now + timedelta(hours=12):
-        obs -= timedelta(days=28)
-    elif obs < now - timedelta(days=20):
-        obs += timedelta(days=28)
-    return obs
+    return min(candidates, key=lambda x: abs((x - now).total_seconds()))
 
 
 def parse_metar_proofs(raw: str, icao: str, lst_offset_h: int,
@@ -123,9 +132,7 @@ class _MetarHTTPWorker:
                 headers["If-Modified-Since"] = self.last_modified
             try:
                 r = self.client.get(self.url, headers=headers)
-                if r.status_code == 304:
-                    pass
-                else:
+                if r.status_code != 304:
                     r.raise_for_status()
                     self.etag = r.headers.get("etag", self.etag)
                     self.last_modified = r.headers.get("last-modified", self.last_modified)
@@ -158,14 +165,20 @@ class DSMReleaseWorker:
         self._done: set[str] = set()
 
     def _targets(self, now: datetime) -> list[datetime]:
+        """Return surrounding release targets, including midnight rollover."""
         wins = list(self.cfg.get("dsm_windows_utc", []))
         if self.cfg.get("dsm_hourly_sweep"):
-            wins.append(f"{now.hour:02d}:15")
-        out = []
-        for w in set(wins):
-            h, m = map(int, w.split(":"))
-            out.append(now.replace(hour=h, minute=m, second=0, microsecond=0))
-        return sorted(out)
+            # Include current and adjacent hour because a hunt can cross :00.
+            for h in ((now - timedelta(hours=1)).hour, now.hour,
+                      (now + timedelta(hours=1)).hour):
+                wins.append(f"{h:02d}:15")
+        out: list[datetime] = []
+        for day_delta in (-1, 0, 1):
+            base = now + timedelta(days=day_delta)
+            for w in set(wins):
+                h, m = map(int, w.split(":"))
+                out.append(base.replace(hour=h, minute=m, second=0, microsecond=0))
+        return sorted(set(out))
 
     def run(self) -> None:
         # Baseline old products so they cannot terminate a new release hunt.
@@ -175,8 +188,9 @@ class DSMReleaseWorker:
             pass
         while not self.stop.is_set():
             now = datetime.now(timezone.utc)
-            candidate = next((t for t in self._targets(now)
-                              if -30 <= (now - t).total_seconds() <= self.safety_timeout_s), None)
+            candidates = [t for t in self._targets(now)
+                          if -30 <= (now - t).total_seconds() <= self.safety_timeout_s]
+            candidate = max(candidates, default=None)
             if candidate is None:
                 self.stop.wait(0.5)
                 continue
@@ -203,7 +217,11 @@ class DSMReleaseWorker:
 
 
 class OMORaceWorker:
-    """Dedicated MADIS HF-ASOS watcher with hot polling around 5-minute batches."""
+    """Dedicated MADIS HF-ASOS watcher with hot polling around 5-minute batches.
+
+    This is a public fallback, not the final desired wire. Direct FAA CSS-Wx OMO
+    and MADIS/Synoptic push feeds can feed the same queue when credentials exist.
+    """
 
     def __init__(self, cfg: dict, sink: Callable[[ProofEvent], None], stop: threading.Event):
         stations = {c["icao"]: c["lst_offset_h"] for c in cfg["cities"].values()
