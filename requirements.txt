@@ -5,5 +5,6 @@ numpy>=1.26
 # live trading + low-latency feeds
 cryptography>=42.0
 slixmpp>=1.8
+nwws-oi-receiver>=1.0.0
 httpx[http2]>=0.27
 websockets>=15.0
