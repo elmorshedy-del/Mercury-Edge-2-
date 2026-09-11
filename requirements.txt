@@ -2,6 +2,8 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 netCDF4>=1.6
 numpy>=1.26
-# optional: live trading + push feed
+# live trading + low-latency feeds
 cryptography>=42.0
 slixmpp>=1.8
+httpx[http2]>=0.27
+websockets>=15.0
