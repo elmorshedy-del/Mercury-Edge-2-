@@ -11,8 +11,8 @@ Immediate public wires:
 - MADIS HF-ASOS public files: dedicated hot polling worker, no city-loop delay
 - IEM AFOS DSM: release hunt continues until a new product is actually observed
 
-Push adapters (FAA CSS-Wx OMO, MADIS LDM, IEM LDM, Synoptic Push) can inject the
-same ProofEvent objects into the queue without changing strategy code.
+Push adapters (FAA CSS-Wx OMO, MADIS LDM, IEM LDM, NWWS-OI, Synoptic Push) can
+inject the same ProofEvent objects through ``push`` without changing strategy.
 """
 from __future__ import annotations
 
@@ -42,12 +42,7 @@ def _month_shift(dt: datetime, delta: int) -> tuple[int, int]:
 
 
 def _metar_obs_time(raw: str, now: datetime) -> datetime | None:
-    """Resolve DDHHMMZ robustly across month/year boundaries.
-
-    METAR has no month field. Build valid candidates in previous/current/next
-    month and select the one nearest ``now`` instead of subtracting a fixed
-    number of days.
-    """
+    """Resolve DDHHMMZ robustly across month/year boundaries."""
     m = METAR_TS.search(raw)
     if not m:
         return None
@@ -81,7 +76,6 @@ def parse_metar_proofs(raw: str, icao: str, lst_offset_h: int,
             icao, cdate, c10_to_f(c10), "metar", obs, now,
             detail=f"{source} {raw[:95]}",
         ))
-    # Synoptic reports stamped :51-:56 can carry the following-hour 6h group.
     if (obs + timedelta(minutes=15)).hour in (0, 6, 12, 18):
         s = SIXHR.search(raw)
         if s:
@@ -118,7 +112,6 @@ class _MetarHTTPWorker:
     def _lines(self, text: str) -> list[str]:
         lines = [x.strip() for x in text.splitlines() if x.strip()]
         if self.tgftp_format:
-            # station TXT is timestamp line + raw METAR line
             return lines[1:] if len(lines) > 1 else []
         return lines
 
@@ -144,10 +137,11 @@ class _MetarHTTPWorker:
                         self.seen_raw.add(raw)
                         for ev in parse_metar_proofs(raw, self.icao, self.lst,
                                                      self.name, seen):
-                            ev = ProofEvent(ev.station, ev.climate_date, ev.level_f,
-                                            ev.channel, ev.obs_ts, ev.seen_ts,
-                                            detail=f"{ev.detail} http={wire_ms:.1f}ms")
-                            self.sink(ev)
+                            self.sink(ProofEvent(
+                                ev.station, ev.climate_date, ev.level_f, ev.channel,
+                                ev.obs_ts, ev.seen_ts,
+                                detail=f"{ev.detail} http={wire_ms:.1f}ms",
+                            ))
             except Exception as exc:
                 log.warning("%s %s: %s", self.name, self.icao, exc)
             self.stop.wait(self.interval_s)
@@ -165,10 +159,8 @@ class DSMReleaseWorker:
         self._done: set[str] = set()
 
     def _targets(self, now: datetime) -> list[datetime]:
-        """Return surrounding release targets, including midnight rollover."""
         wins = list(self.cfg.get("dsm_windows_utc", []))
         if self.cfg.get("dsm_hourly_sweep"):
-            # Include current and adjacent hour because a hunt can cross :00.
             for h in ((now - timedelta(hours=1)).hour, now.hour,
                       (now + timedelta(hours=1)).hour):
                 wins.append(f"{h:02d}:15")
@@ -181,7 +173,6 @@ class DSMReleaseWorker:
         return sorted(set(out))
 
     def run(self) -> None:
-        # Baseline old products so they cannot terminate a new release hunt.
         try:
             self.feed.poll()
         except Exception:
@@ -203,10 +194,10 @@ class DSMReleaseWorker:
                 evs = self.feed.poll()
                 if evs:
                     for ev in evs:
-                        tagged = ProofEvent(ev.station, ev.climate_date, ev.level_f,
-                                            ev.channel, ev.obs_ts, ev.seen_ts,
-                                            detail=f"iem-afos {ev.detail}")
-                        self.sink(tagged)
+                        self.sink(ProofEvent(
+                            ev.station, ev.climate_date, ev.level_f, ev.channel,
+                            ev.obs_ts, ev.seen_ts, detail=f"iem-afos {ev.detail}",
+                        ))
                     self._done.add(key)
                     break
                 self.stop.wait(self.poll_s)
@@ -217,11 +208,7 @@ class DSMReleaseWorker:
 
 
 class OMORaceWorker:
-    """Dedicated MADIS HF-ASOS watcher with hot polling around 5-minute batches.
-
-    This is a public fallback, not the final desired wire. Direct FAA CSS-Wx OMO
-    and MADIS/Synoptic push feeds can feed the same queue when credentials exist.
-    """
+    """Dedicated MADIS HF-ASOS watcher around public five-minute batches."""
 
     def __init__(self, cfg: dict, sink: Callable[[ProofEvent], None], stop: threading.Event):
         stations = {c["icao"]: c["lst_offset_h"] for c in cfg["cities"].values()
@@ -236,10 +223,10 @@ class OMORaceWorker:
         while not self.stop.is_set():
             try:
                 for ev in self.feed.poll():
-                    tagged = ProofEvent(ev.station, ev.climate_date, ev.level_f,
-                                        ev.channel, ev.obs_ts, ev.seen_ts,
-                                        detail=f"madis-hf {ev.detail}")
-                    self.sink(tagged)
+                    self.sink(ProofEvent(
+                        ev.station, ev.climate_date, ev.level_f, ev.channel,
+                        ev.obs_ts, ev.seen_ts, detail=f"madis-hf {ev.detail}",
+                    ))
             except Exception as exc:
                 log.warning("MADIS HF watcher: %s", exc)
             now = datetime.now(timezone.utc)
@@ -254,10 +241,11 @@ class SourceRace:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.stop = threading.Event()
-        self.events: queue.SimpleQueue[ProofEvent] = queue.SimpleQueue()
+        self.events: queue.Queue[ProofEvent] = queue.Queue()
         self.threads: list[threading.Thread] = []
 
-    def _sink(self, ev: ProofEvent) -> None:
+    def push(self, ev: ProofEvent) -> None:
+        """Public ingress for HTTP workers and external push-feed adapters."""
         self.events.put(ev)
 
     def start(self) -> None:
@@ -266,22 +254,22 @@ class SourceRace:
             tg = _MetarHTTPWorker(
                 "tgftp", icao, lst,
                 f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{icao}.TXT",
-                float(os.getenv("MERCURY_TGFTP_POLL_S", "1.0")), self._sink, self.stop,
+                float(os.getenv("MERCURY_TGFTP_POLL_S", "1.0")), self.push, self.stop,
                 tgftp_format=True,
             )
             awc = _MetarHTTPWorker(
                 "aviationweather", icao, lst,
                 f"https://aviationweather.gov/api/data/metar?ids={icao}&format=raw&hours=2",
-                float(os.getenv("MERCURY_AWC_POLL_S", "5.0")), self._sink, self.stop,
+                float(os.getenv("MERCURY_AWC_POLL_S", "5.0")), self.push, self.stop,
             )
             for name, fn in ((f"tgftp-{key}", tg.run), (f"awc-{key}", awc.run)):
                 th = threading.Thread(target=fn, daemon=True, name=name)
                 th.start(); self.threads.append(th)
-            dsm = DSMReleaseWorker(key, c, self._sink, self.stop)
+            dsm = DSMReleaseWorker(key, c, self.push, self.stop)
             th = threading.Thread(target=dsm.run, daemon=True, name=f"dsm-{key}")
             th.start(); self.threads.append(th)
 
-        omo = OMORaceWorker(self.cfg, self._sink, self.stop)
+        omo = OMORaceWorker(self.cfg, self.push, self.stop)
         th = threading.Thread(target=omo.run, daemon=True, name="madis-hf")
         th.start(); self.threads.append(th)
 
