@@ -1,7 +1,8 @@
 """Experimental Twilio transport for direct ASOS telephone OMO.
 
-No call is placed here. The only path from speech to ProofEvent is the existing
-fail-closed ASOS voice parser.
+No call is placed here. Speech becomes a proof only through the fail-closed ASOS
+voice parser. In shadow mode, valid proofs are timestamped to JSONL even when no
+local trading proof bus is attached.
 """
 from __future__ import annotations
 
@@ -40,8 +41,7 @@ def _escape(s: str) -> str:
 
 def _ws_base(http_base: str) -> str:
     p = urlparse(http_base)
-    scheme = "wss" if p.scheme == "https" else "ws"
-    return f"{scheme}://{p.netloc}{p.path.rstrip('/')}"
+    return f"{'wss' if p.scheme == 'https' else 'ws'}://{p.netloc}{p.path.rstrip('/')}"
 
 
 def _candidate_text(call_sid: str, newest: str) -> list[str]:
@@ -58,6 +58,17 @@ def _candidate_text(call_sid: str, newest: str) -> list[str]:
     return list(dict.fromkeys(x for x in texts if x))
 
 
+def _write_shadow(record: dict) -> None:
+    path = os.getenv("MERCURY_VOICE_LOG", "").strip()
+    if not path:
+        return
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
 def _emit_if_valid(icao: str, call_sid: str, transcript: str, received_ts: datetime) -> dict:
     cfg = BY_ICAO.get(icao)
     if not cfg:
@@ -67,21 +78,35 @@ def _emit_if_valid(icao: str, call_sid: str, transcript: str, received_ts: datet
             icao, int(cfg["lst_offset_h"]), candidate, seen_ts=received_ts,
             max_age_s=float(os.getenv("MERCURY_VOICE_MAX_AGE_S", "150")),
         )
-        if ev is not None:
-            try:
-                send_proof(ev)
-            except Exception as exc:
-                log.warning("proof bus send failed: %s", exc)
-                return {"accepted": False, "reason": "proof_bus_unavailable"}
-            return {"accepted": True, "station": icao, "level_f": ev.level_f,
-                    "obs_ts": ev.obs_ts.isoformat() if ev.obs_ts else None,
-                    "seen_ts": ev.seen_ts.isoformat()}
+        if ev is None:
+            continue
+        record = {
+            "received_ts": received_ts.isoformat(), "station": icao,
+            "level_f": ev.level_f,
+            "obs_ts": ev.obs_ts.isoformat() if ev.obs_ts else None,
+            "obs_to_seen_ms": ((received_ts - ev.obs_ts).total_seconds() * 1000 if ev.obs_ts else None),
+            "call_sid": call_sid, "source": "asos-voice",
+        }
+        _write_shadow(record)
+        bus_sent = True
+        try:
+            send_proof(ev)
+        except Exception as exc:
+            bus_sent = False
+            log.info("proof bus unavailable in voice shadow: %s", exc)
+        require_bus = os.getenv("MERCURY_VOICE_REQUIRE_BUS", "1").lower() not in {"0", "false", "no"}
+        if require_bus and not bus_sent:
+            return {"accepted": False, "reason": "proof_bus_unavailable", "shadow_recorded": bool(os.getenv("MERCURY_VOICE_LOG"))}
+        return {"accepted": True, "station": icao, "level_f": ev.level_f,
+                "obs_ts": record["obs_ts"], "seen_ts": ev.seen_ts.isoformat(),
+                "bus_sent": bus_sent, "shadow_recorded": bool(os.getenv("MERCURY_VOICE_LOG"))}
     return {"accepted": False, "reason": "no_fresh_unambiguous_proof"}
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "stations": sorted(k for k, v in BY_ICAO.items() if v.get("asos_phone"))}
+    return {"ok": True, "shadow": os.getenv("MERCURY_VOICE_REQUIRE_BUS", "1") in {"0", "false", "no"},
+            "stations": sorted(k for k, v in BY_ICAO.items() if v.get("asos_phone"))}
 
 
 @app.api_route("/twilio/answer/{icao}", methods=["GET", "POST"])
@@ -92,13 +117,11 @@ async def twilio_answer(icao: str, request: Request, mode: str = "transcription"
     base = _public_base(request)
     if mode == "media":
         stream = _escape(f"{_ws_base(base)}/twilio/media/{icao}")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<Response><Start><Stream url="{stream}" track="inbound_track" /></Start><Pause length="300" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Stream url="{stream}" track="inbound_track" /></Start><Pause length="300" /></Response>'''
     elif mode == "transcription":
         callback = _escape(f"{base}/twilio/transcription/{icao}")
         hints = _escape("automated weather observation,temperature,celsius,zulu,zero,one,two,three,four,five,six,seven,eight,niner,minus")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="300" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="300" /></Response>'''
     else:
         return Response("mode must be transcription or media", status_code=400)
     return Response(content=twiml, media_type="application/xml")
