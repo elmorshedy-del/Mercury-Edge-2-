@@ -9,6 +9,7 @@ Goals:
 - never fetch a quote after a weather proof arrives;
 - load/parse the RSA key once;
 - reuse one HTTP/2 connection pool for fallback REST order entry;
+- make retries idempotent across network timeouts/restarts;
 - use Kalshi's current external-api host + V2 event-order endpoint.
 
 FIX order entry should replace REST when account access is available; see
@@ -17,6 +18,7 @@ LOW_LATENCY_ARCHITECTURE.md.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -46,9 +48,23 @@ def _read_private_key():
     raw = os.environ.get("KALSHI_PRIVATE_KEY", "")
     if not raw:
         return None
-    p = Path(raw)
-    pem = p.read_bytes() if p.exists() else raw.encode()
+    # Accept either a path (legacy Mercury setup) or PEM text in an env var.
+    if "-----BEGIN" in raw:
+        pem = raw.encode()
+    else:
+        pem = Path(raw).read_bytes()
     return serialization.load_pem_private_key(pem, password=None)
+
+
+def kill_client_order_id(intent: Intent) -> str:
+    """Stable ID for exactly one kill of one dated market.
+
+    Kalshi documents client_order_id as the deduplication key to reuse when a
+    request's network result is ambiguous. Weather market tickers include date,
+    so ticker + strategy namespace identifies the intended one-time kill.
+    """
+    digest = hashlib.sha256(f"mercury-kill-v1|{intent.ticker}".encode()).hexdigest()[:32]
+    return f"mk-{digest}"
 
 
 class KalshiSigner:
@@ -112,12 +128,7 @@ class KalshiBookCache:
         self._stop.set()
 
     def quote(self, ticker: str) -> tuple[int | None, int | None]:
-        """Return conservative whole-cent (YES bid, YES ask) from RAM.
-
-        Strategy V1 reasons in whole cents. With subpenny books, the bid is
-        floored and ask is ceiled so we never make a stale price look better than
-        it really is.
-        """
+        """Return conservative whole-cent (YES bid, YES ask) from RAM."""
         with self._lock:
             b = self._books.get(ticker)
             if not b:
@@ -182,9 +193,6 @@ class KalshiBookCache:
                         "params": {
                             "channels": ["orderbook_delta"],
                             "market_tickers": sorted(self._tickers),
-                            # Keep the currently documented legacy orderbook scale
-                            # explicit: no-side levels are NO prices. Strategy only
-                            # requires YES bids, but quote() also derives YES ask.
                             "use_yes_price": False,
                         },
                     }, separators=(",", ":")))
@@ -214,9 +222,9 @@ class KalshiBookCache:
 class FastRestExecutor:
     """Persistent fallback order path.
 
-    This is materially faster than exec_live.py because it avoids loading the RSA
-    key and establishing a fresh HTTPS connection for each proof. For the final
-    race path, Kalshi FIX should be preferred when available.
+    This avoids loading the RSA key and establishing a fresh HTTPS connection for
+    each proof. For the final race path, Kalshi FIX should be preferred when
+    available.
     """
 
     def __init__(self, signer: KalshiSigner | None = None):
@@ -238,12 +246,10 @@ class FastRestExecutor:
         if not self.enabled:
             return {"mode": "DISABLED", "ticker": intent.ticker}
 
-        # V2 event-order API quotes the YES leg directly. Asking YES at min_px is
-        # economically equivalent to buying NO at 1-min_px and consumes resting
-        # YES bids at min_px or better.
+        client_order_id = kill_client_order_id(intent)
         body = {
             "ticker": intent.ticker,
-            "client_order_id": f"mercury-{time.time_ns()}",
+            "client_order_id": client_order_id,
             "side": "ask",
             "count": f"{float(intent.max_size):.2f}",
             "price": f"{intent.min_px / 100.0:.4f}",
@@ -262,8 +268,23 @@ class FastRestExecutor:
         t_signed = time.perf_counter_ns()
         resp = self.client.post(ORDER_PATH, headers=headers, json=body)
         t_done = time.perf_counter_ns()
+        if resp.status_code == 409:
+            # Same deterministic client_order_id means an earlier ambiguous
+            # submission reached Kalshi. Treat as deduplicated, not a second order.
+            return {
+                "mode": "DEDUPLICATED",
+                "ticker": intent.ticker,
+                "client_order_id": client_order_id,
+                "status_code": 409,
+                "_mercury_latency_ms": {
+                    "sign": round((t_signed - t0) / 1e6, 3),
+                    "post_roundtrip": round((t_done - t_signed) / 1e6, 3),
+                    "total": round((t_done - t0) / 1e6, 3),
+                },
+            }
         resp.raise_for_status()
         out = resp.json()
+        out["client_order_id"] = out.get("client_order_id", client_order_id)
         out["_mercury_latency_ms"] = {
             "sign": round((t_signed - t0) / 1e6, 3),
             "post_roundtrip": round((t_done - t_signed) / 1e6, 3),
