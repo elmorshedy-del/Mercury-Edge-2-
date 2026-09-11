@@ -1,17 +1,7 @@
 """Summarize Mercury source-race measurements without confusing backfill with latency.
 
-Usage:
-    PYTHONPATH=engine python research/source_race_report.py
-    PYTHONPATH=engine python research/source_race_report.py /data/source_race.jsonl
-
-The report deliberately separates:
-- exact races: every compared arrival was observed after probe warm-up;
-- left-censored races: one source already had the observation at warm start, so
-  we know it beat another source by *at least* the observed gap but not when it
-  first became available upstream.
-
-The economic question is which source first reaches Mercury, not merely the age
-of the underlying weather observation.
+Only rows explicitly tagged ``warm_start: false`` count as fresh. Legacy rows
+without the field are unknown and can never become exact latency evidence.
 """
 from __future__ import annotations
 
@@ -55,11 +45,7 @@ def load_rows(path: Path) -> list[dict]:
 
 
 def signature(r: dict) -> tuple:
-    # obs_ts is the strongest cross-source identity for METAR/OMO. level/channel
-    # protect against accidental pairing when a source emits multiple proof types.
-    return (
-        r.get("station"), r.get("obs_ts"), r.get("channel"), r.get("level_f"),
-    )
+    return (r.get("station"), r.get("obs_ts"), r.get("channel"), r.get("level_f"))
 
 
 def iso_seconds(s: str) -> float:
@@ -78,13 +64,14 @@ def build_report(rows: list[dict]) -> dict:
 
     source_stats = {}
     for src, rs in sorted(by_source.items()):
-        fresh = [r for r in rs if not r.get("warm_start")]
-        lags = [float(r["obs_to_seen_ms"]) for r in fresh
-                if r.get("obs_to_seen_ms") is not None]
+        fresh = [r for r in rs if r.get("warm_start") is False]
+        unknown = [r for r in rs if r.get("warm_start") is None]
+        lags = [float(r["obs_to_seen_ms"]) for r in fresh if r.get("obs_to_seen_ms") is not None]
         rtts = transport.get(src, [])
         source_stats[src] = {
             "records": len(rs),
             "fresh_records": len(fresh),
+            "unknown_freshness_records": len(unknown),
             "obs_to_seen_ms_median": round(statistics.median(lags), 3) if lags else None,
             "obs_to_seen_ms_p90": round(percentile(lags, .90), 3) if lags else None,
             "obs_to_seen_ms_p95": round(percentile(lags, .95), 3) if lags else None,
@@ -99,11 +86,9 @@ def build_report(rows: list[dict]) -> dict:
 
     exact_wins = Counter()
     exact_pair_gaps = defaultdict(list)
-    censored = []
-    races = []
+    censored, unknown_races, races = [], [], []
 
     for sig, rs in grouped.items():
-        # Earliest appearance per source for this exact observation/proof.
         first = {}
         for r in rs:
             src = r["source"]
@@ -112,29 +97,27 @@ def build_report(rows: list[dict]) -> dict:
         if len(first) < 2:
             continue
         ordered = sorted(first.values(), key=lambda r: r["seen_ts"])
-        winner = ordered[0]
-        runner = ordered[1]
+        winner, runner = ordered[0], ordered[1]
         gap_ms = (iso_seconds(runner["seen_ts"]) - iso_seconds(winner["seen_ts"])) * 1000
+        ws, rs_ = winner.get("warm_start"), runner.get("warm_start")
         race = {
             "signature": sig,
             "winner": winner["source"],
             "runner_up": runner["source"],
             "gap_ms": round(gap_ms, 3),
-            "winner_warm_start": bool(winner.get("warm_start")),
-            "runner_warm_start": bool(runner.get("warm_start")),
+            "winner_warm_start": ws,
+            "runner_warm_start": rs_,
         }
         races.append(race)
-        if not winner.get("warm_start") and not runner.get("warm_start"):
+        if ws is False and rs_ is False:
             exact_wins[winner["source"]] += 1
             exact_pair_gaps[(winner["source"], runner["source"])].append(gap_ms)
-        elif winner.get("warm_start") and not runner.get("warm_start"):
-            censored.append({
-                **race,
-                "interpretation": (
-                    f"{winner['source']} beat {runner['source']} by at least "
-                    f"{gap_ms/1000:.3f}s; winner was already present at warm start"
-                ),
-            })
+        elif ws is True and rs_ is False:
+            censored.append({**race, "interpretation": (
+                f"{winner['source']} beat {runner['source']} by at least {gap_ms/1000:.3f}s; "
+                "winner was already present at warm start")})
+        elif ws is None or rs_ is None:
+            unknown_races.append(race)
 
     pairwise = {}
     for (a, b), gaps in sorted(exact_pair_gaps.items()):
@@ -150,14 +133,14 @@ def build_report(rows: list[dict]) -> dict:
         "exact_source_wins": dict(exact_wins),
         "exact_pairwise": pairwise,
         "left_censored_races": censored[-50:],
+        "unknown_freshness_races": unknown_races[-50:],
         "race_count": len(races),
     }
 
 
 def main() -> None:
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT
-    report = build_report(load_rows(path))
-    print(json.dumps(report, indent=2, default=str))
+    print(json.dumps(build_report(load_rows(path)), indent=2, default=str))
 
 
 if __name__ == "__main__":
