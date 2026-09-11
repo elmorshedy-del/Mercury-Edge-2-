@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - feature/ultra-low-latency-race-engine
+      - feature/asos-voice-transport
   pull_request:
     paths:
       - 'engine/**'
-      - 'research/source_race_*.py'
+      - 'research/*.py'
       - 'tests/test_*.py'
       - 'requirements.txt'
       - '.github/workflows/race-engine.yml'
