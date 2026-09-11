@@ -1,18 +1,16 @@
 """Independent low-latency weather-source workers.
 
-The current production runtime serializes cities and sleeps between blocking
-requests. This module does the opposite: every wire runs independently and all
-valid proofs are pushed into one queue. Duplicate proofs are expected; the kill
-engine's fired-state makes the first valid arrival win.
+All public wires run independently and emit normalized ProofEvents. The first
+valid proof wins; duplicate arrivals are retained for latency measurement.
 
 Immediate public wires:
-- TGFTP station file: continuous METAR/SPECI watcher (primary public METAR race)
-- AviationWeather Data API: independent fallback watcher
-- MADIS HF-ASOS public files: dedicated hot polling worker, no city-loop delay
-- IEM AFOS DSM: one coordinated release hunter for all stations (rate-limit safe)
+- NWS TGFTP station file: continuous METAR/SPECI watcher.
+- AviationWeather Data API: independent METAR/SPECI fallback.
+- MADIS public HF-ASOS netCDF: isolated five-minute-batch watcher.
+- IEM AFOS raw ARTCC DSM collectives: coordinated, rate-limit-safe fallback.
 
-Push adapters (FAA CSS-Wx OMO, MADIS LDM, IEM LDM, NWWS-OI, Synoptic Push) can
-inject the same ProofEvent objects through ``push`` without changing strategy.
+Privileged/direct adapters (FAA CSS-Wx, MADIS/IEM LDM, NWWS-OI, Synoptic Push)
+can inject the same ProofEvent objects through SourceRace.push().
 """
 from __future__ import annotations
 
@@ -20,19 +18,21 @@ import calendar
 import logging
 import os
 import queue
-import re
 import threading
 import time
-from datetime import date as Date, datetime, timedelta, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import httpx
 
 from decode import c10_to_f
-from feeds import DSBODY, MAXTOK, OMOFeed, ProofEvent, SIXHR, TGRP
+from dsm_decode import parse_dsm_text
+from feeds import OMOFeed, ProofEvent, SIXHR, TGRP
 
 log = logging.getLogger("fast_sources")
 
+import re
 METAR_TS = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
 
 
@@ -111,9 +111,7 @@ class _MetarHTTPWorker:
 
     def _lines(self, text: str) -> list[str]:
         lines = [x.strip() for x in text.splitlines() if x.strip()]
-        if self.tgftp_format:
-            return lines[1:] if len(lines) > 1 else []
-        return lines
+        return lines[1:] if self.tgftp_format and len(lines) > 1 else lines
 
     def run(self) -> None:
         while not self.stop.is_set():
@@ -131,6 +129,11 @@ class _MetarHTTPWorker:
                     self.last_modified = r.headers.get("last-modified", self.last_modified)
                     seen = datetime.now(timezone.utc)
                     wire_ms = (time.perf_counter_ns() - t0) / 1e6
+                    meta = (
+                        f"http={wire_ms:.1f}ms "
+                        f"last_modified={r.headers.get('last-modified', '-')} "
+                        f"server_date={r.headers.get('date', '-')}"
+                    )
                     for raw in self._lines(r.text):
                         if raw in self.seen_raw:
                             continue
@@ -139,25 +142,23 @@ class _MetarHTTPWorker:
                                                      self.name, seen):
                             self.sink(ProofEvent(
                                 ev.station, ev.climate_date, ev.level_f, ev.channel,
-                                ev.obs_ts, ev.seen_ts,
-                                detail=f"{ev.detail} http={wire_ms:.1f}ms",
+                                ev.obs_ts, ev.seen_ts, detail=f"{ev.detail} {meta}",
                             ))
             except Exception as exc:
                 log.warning("%s %s: %s", self.name, self.icao, exc)
             self.stop.wait(self.interval_s)
 
 
-class DSMHTTPRaceWorker:
-    """Coordinate all IEM-AFOS DSM polling through one rate-limited scheduler.
+class DSMCollectiveHTTPWorker:
+    """Race raw CDUS27 ARTCC DSM collectives before IEM's station split.
 
-    The previous implementation launched one hot loop per city. Several :15
-    release windows overlap, so those loops could hit IEM simultaneously and
-    produce HTTP 429 responses. This worker keeps the same low-latency intent but
-    makes only one request at a time, round-robins active releases, and applies a
-    global exponential backoff when IEM rate-limits us.
+    IEM documents airport-specific DSM PILs as a value-added split from the raw
+    collective. We therefore query one raw collective per ARTCC and parse the
+    target stations locally. NYC and PHL share ZNY, reducing request count too.
 
-    Expected release time starts the hunt. Seeing a genuinely new DSM line ends
-    that station's hunt. A short fixed elapsed window never silently ends it.
+    One scheduler owns all requests, round-robins only active release hunts, and
+    applies a global exponential backoff on HTTP 429. Seeing a new station line
+    ends only that station's current expected-release hunt.
     """
 
     BASE = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
@@ -176,7 +177,12 @@ class DSMHTTPRaceWorker:
                                 keepalive_expiry=180.0),
             headers={"User-Agent": "mercury-edge-race/1"},
         )
-        self.seen: dict[str, set[str]] = {k: set() for k in cfg["cities"]}
+        self.groups: dict[str, dict[str, dict]] = defaultdict(dict)
+        for key, city in cfg["cities"].items():
+            pil = city.get("dsm_collective_pil")
+            if pil:
+                self.groups[pil][key] = city
+        self.seen_lines: dict[str, set[str]] = {pil: set() for pil in self.groups}
         self.done: set[tuple[str, str]] = set()
         self.backoff_s = 0.0
         self._rr = 0
@@ -202,106 +208,106 @@ class DSMHTTPRaceWorker:
                  and (key, t.isoformat()) not in self.done]
         return max(valid, default=None)
 
-    def _url(self, city: dict) -> str:
-        return f"{self.BASE}?pil={city['dsm_pil']}&fmt=text&limit=3"
+    def _url(self, pil: str) -> str:
+        return f"{self.BASE}?pil={pil}&fmt=text&limit=3"
 
-    def _fetch(self, key: str, city: dict, emit: bool) -> bool:
-        """Return True only when a new valid DSM line was observed."""
+    def _fetch(self, pil: str, members: dict[str, dict], emit: bool,
+               active_targets: dict[str, datetime] | None = None) -> set[str]:
+        """Return city keys for which a genuinely new station DSM was seen."""
         t0 = time.perf_counter_ns()
         try:
-            r = self.client.get(self._url(city))
+            r = self.client.get(self._url(pil))
             if r.status_code == 429:
                 retry = r.headers.get("retry-after")
                 try:
-                    retry_s = float(retry) if retry is not None else 0.0
+                    retry_s = float(retry) if retry else 0.0
                 except ValueError:
                     retry_s = 0.0
                 self.backoff_s = min(
                     self.max_backoff_s,
                     max(retry_s, 2.0, self.backoff_s * 2 if self.backoff_s else 2.0),
                 )
-                log.warning("IEM DSM rate limited; global backoff %.1fs", self.backoff_s)
-                return False
+                log.warning("IEM DSM collective rate limited; global backoff %.1fs",
+                            self.backoff_s)
+                return set()
             r.raise_for_status()
             self.backoff_s = 0.0
         except Exception as exc:
-            log.warning("DSM fetch %s failed: %s", city["dsm_pil"], exc)
-            return False
+            log.warning("DSM collective %s failed: %s", pil, exc)
+            return set()
 
-        now = datetime.now(timezone.utc)
+        seen = datetime.now(timezone.utc)
         wire_ms = (time.perf_counter_ns() - t0) / 1e6
-        found = False
+        meta = (
+            f"http={wire_ms:.1f}ms "
+            f"last_modified={r.headers.get('last-modified', '-')} "
+            f"server_date={r.headers.get('date', '-')}"
+        )
+        fresh_lines = []
         for raw in r.text.splitlines():
             line = raw.strip()
-            m = DSBODY.match(line)
-            if not m or m.group(1) != city["icao"]:
+            if not line or line in self.seen_lines[pil]:
                 continue
-            if line in self.seen[key]:
+            self.seen_lines[pil].add(line)
+            fresh_lines.append(line)
+        if not emit or not fresh_lines:
+            return set()
+
+        member_cfgs = {k: v for k, v in members.items()}
+        events = parse_dsm_text("\n".join(fresh_lines), member_cfgs,
+                                f"iem-collective:{pil}", seen)
+        by_icao = {c["icao"]: k for k, c in members.items()}
+        completed: set[str] = set()
+        for ev in events:
+            key = by_icao.get(ev.station)
+            if key is None:
                 continue
-            self.seen[key].add(line)
-            if not emit:
+            # If this collective was fetched for active hunts, ignore a station
+            # that is not currently hunting; its line remains useful as baseline.
+            if active_targets is not None and key not in active_targets:
                 continue
-            hhmm, dd, mm = m.group(2), int(m.group(3)), int(m.group(4))
-            tok = m.group(5).split("/")[0].strip()
-            mt = MAXTOK.match(tok)
-            if not mt:
-                continue
-            max_f, max_hhmm = int(mt.group(1)), mt.group(2)
-            if not (20 <= max_f <= 130):
-                continue
-            try:
-                cdate = Date(now.year, mm, dd)
-            except ValueError:
-                continue
-            obs = None
-            try:
-                obs = (
-                    datetime(cdate.year, cdate.month, cdate.day,
-                             int(max_hhmm[:2]) % 24, int(max_hhmm[2:]) % 60,
-                             tzinfo=timezone.utc)
-                    - timedelta(hours=city["lst_offset_h"])
-                )
-            except Exception:
-                pass
             self.sink(ProofEvent(
-                city["icao"], cdate, max_f, "dsm", obs, now,
-                detail=(f"iem-afos DS {hhmm or 'final'} max {max_f}F @{max_hhmm} LST "
-                        f"http={wire_ms:.1f}ms"),
+                ev.station, ev.climate_date, ev.level_f, ev.channel,
+                ev.obs_ts, ev.seen_ts, detail=f"{ev.detail} {meta}",
             ))
-            found = True
-        return found
+            completed.add(key)
+        return completed
 
     def run(self) -> None:
-        # One polite sequential baseline prevents old products from terminating
-        # the first release hunt and avoids a startup burst across all PILs.
-        for key, city in self.cfg["cities"].items():
+        # Sequential baseline of raw collectives. This avoids treating existing
+        # products as a fresh release and avoids a startup request burst.
+        for pil, members in self.groups.items():
             if self.stop.is_set():
                 return
-            self._fetch(key, city, emit=False)
-            self.stop.wait(max(self.global_poll_s, 0.5))
+            self._fetch(pil, members, emit=False)
+            self.stop.wait(max(self.global_poll_s, 1.0))
 
         while not self.stop.is_set():
             now = datetime.now(timezone.utc)
-            active: list[tuple[str, dict, datetime]] = []
-            for key, city in self.cfg["cities"].items():
-                target = self._active_target(key, city, now)
-                if target is not None:
-                    active.append((key, city, target))
+            active_groups: list[tuple[str, dict[str, dict], dict[str, datetime]]] = []
+            for pil, members in self.groups.items():
+                active_targets = {}
+                for key, city in members.items():
+                    target = self._active_target(key, city, now)
+                    if target is not None:
+                        active_targets[key] = target
+                if active_targets:
+                    active_groups.append((pil, members, active_targets))
 
-            if not active:
+            if not active_groups:
                 self.stop.wait(0.5)
                 continue
 
-            # Round-robin active PILs. One global request per interval means an
-            # overlap of N release hunts yields ~N*interval cadence per station.
-            self._rr %= len(active)
-            key, city, target = active[self._rr]
-            self._rr = (self._rr + 1) % len(active)
-            if self._fetch(key, city, emit=True):
-                self.done.add((key, target.isoformat()))
+            self._rr %= len(active_groups)
+            pil, members, active_targets = active_groups[self._rr]
+            self._rr = (self._rr + 1) % len(active_groups)
+            completed = self._fetch(pil, members, emit=True,
+                                    active_targets=active_targets)
+            for key in completed:
+                self.done.add((key, active_targets[key].isoformat()))
 
             wait_s = self.backoff_s if self.backoff_s else self.global_poll_s
-            self.stop.wait(max(wait_s, 0.25))
+            self.stop.wait(max(wait_s, 0.5))
 
 
 class OMORaceWorker:
@@ -342,7 +348,6 @@ class SourceRace:
         self.threads: list[threading.Thread] = []
 
     def push(self, ev: ProofEvent) -> None:
-        """Public ingress for HTTP workers and external push-feed adapters."""
         self.events.put(ev)
 
     def start(self) -> None:
@@ -363,8 +368,8 @@ class SourceRace:
                 th = threading.Thread(target=fn, daemon=True, name=name)
                 th.start(); self.threads.append(th)
 
-        dsm = DSMHTTPRaceWorker(self.cfg, self.push, self.stop)
-        th = threading.Thread(target=dsm.run, daemon=True, name="dsm-iem-coordinator")
+        dsm = DSMCollectiveHTTPWorker(self.cfg, self.push, self.stop)
+        th = threading.Thread(target=dsm.run, daemon=True, name="dsm-iem-collectives")
         th.start(); self.threads.append(th)
 
         omo = OMORaceWorker(self.cfg, self.push, self.stop)
