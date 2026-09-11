@@ -19,14 +19,13 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDisconnect
 
 from asos_voice import parse_voice_transcript
-from proof_bus import ProofBusSender
+from proof_bus import send_proof
 
 log = logging.getLogger("twilio_asos")
 HERE = Path(__file__).resolve().parent
 CFG = json.load(open(HERE / "config.json"))
 BY_ICAO = {c["icao"]: c for c in CFG["cities"].values()}
 app = FastAPI(title="Mercury ASOS Voice Gateway")
-BUS = ProofBusSender()
 _TRANSCRIPTS: dict[str, deque[tuple[float, str]]] = defaultdict(lambda: deque(maxlen=16))
 _LOCK = threading.RLock()
 
@@ -70,7 +69,7 @@ def _emit_if_valid(icao: str, call_sid: str, transcript: str, received_ts: datet
         )
         if ev is not None:
             try:
-                BUS.send(ev)
+                send_proof(ev)
             except Exception as exc:
                 log.warning("proof bus send failed: %s", exc)
                 return {"accepted": False, "reason": "proof_bus_unavailable"}
