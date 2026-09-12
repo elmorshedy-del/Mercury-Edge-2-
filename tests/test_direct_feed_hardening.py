@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "research"))
 from direct_sources import AviationWeatherBatchWorker  # noqa: E402
 from faa_csswx_bridge import decode_csswx_message  # noqa: E402
 from kalshi_fix import SOH, encode_fix, parse_fix, split_fix_messages  # noqa: E402
+from ldm_weather_pipe import parse_ldm_line  # noqa: E402
 from nwws_bus import parse_nwws_product  # noqa: E402
 from source_scoreboard import summarize  # noqa: E402
 
@@ -121,6 +122,27 @@ class NwwsNormalizationTests(unittest.TestCase):
         self.assertEqual(evs[0].obs_ts, datetime(2026, 9, 30, 23, 53, tzinfo=timezone.utc))
 
 
+class LdmNormalizationTests(unittest.TestCase):
+    def test_ldm_dsm_line_uses_shared_decoder(self):
+        seen = datetime(2026, 9, 11, 21, 16, tzinfo=timezone.utc)
+        evs = parse_ldm_line("KPHL DS 2115 11/09 821500/ /", seen)
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].channel, "dsm")
+        self.assertEqual(evs[0].station, "KPHL")
+        self.assertTrue(evs[0].detail.startswith("ldm-ids"))
+
+    def test_ldm_metar_and_sixhr_use_shared_decoder(self):
+        seen = datetime(2026, 9, 11, 17, 54, tzinfo=timezone.utc)
+        line = "KPHL 111753Z 18005KT 10SM CLR 20/10 A3000 RMK AO2 T02000100 10222"
+        evs = parse_ldm_line(line, seen)
+        self.assertEqual({e.channel for e in evs}, {"metar", "sixhr"})
+        self.assertTrue(all(e.station == "KPHL" for e in evs))
+        self.assertTrue(all(e.detail.startswith("ldm-ids") for e in evs))
+
+    def test_ldm_irrelevant_line_fails_closed(self):
+        self.assertEqual(parse_ldm_line("CDUS27 KZNY 112116"), [])
+
+
 class FixCodecTests(unittest.TestCase):
     def test_fix_frame_body_length_checksum_and_stream_split(self):
         msg = encode_fix([
@@ -130,7 +152,6 @@ class FixCodecTests(unittest.TestCase):
         fields = parse_fix(msg)
         self.assertEqual(fields["8"], "FIXT.1.1")
         self.assertEqual(fields["35"], "0")
-        # BodyLength is bytes after tag 9's SOH through the SOH before checksum.
         after_9 = msg.split(b"\x01", 2)[2]
         body, checksum_field = after_9.rsplit(b"10=", 1)
         self.assertEqual(int(fields["9"]), len(body))
@@ -155,6 +176,18 @@ class ScoreboardTests(unittest.TestCase):
         self.assertEqual(len(s["METAR/SPECI + 6HR"]), 1)
         self.assertEqual(s["METAR/SPECI + 6HR"][0]["source"], "fresh")
         self.assertEqual(s["METAR/SPECI + 6HR"][0]["median_s"], 2.0)
+
+    def test_v2_invalid_measurement_is_excluded_even_if_not_warm(self):
+        rows = [
+            {"source": "bad", "station": "KPHL", "seen_ts": "x",
+             "channel": "metar", "obs_to_seen_ms": 1000,
+             "warm_start": False, "measurement_valid": False},
+            {"source": "good", "station": "KPHL", "seen_ts": "x",
+             "channel": "metar", "obs_to_seen_ms": 2000,
+             "warm_start": False, "measurement_valid": True},
+        ]
+        s = summarize(rows)
+        self.assertEqual([r["source"] for r in s["METAR/SPECI + 6HR"]], ["good"])
 
 
 if __name__ == "__main__":
