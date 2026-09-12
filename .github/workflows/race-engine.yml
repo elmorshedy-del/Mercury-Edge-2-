@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - feature/ultra-low-latency-race-engine
+      - feature/direct-feed-hardening
   pull_request:
     paths:
       - 'engine/**'
       - 'research/source_race_*.py'
+      - 'research/source_scoreboard.py'
       - 'tests/test_*.py'
       - 'requirements.txt'
       - '.github/workflows/race-engine.yml'
