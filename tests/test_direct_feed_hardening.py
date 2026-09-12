@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "research"))
 from direct_sources import AviationWeatherBatchWorker  # noqa: E402
 from faa_csswx_bridge import decode_csswx_message  # noqa: E402
 from kalshi_fix import SOH, encode_fix, parse_fix, split_fix_messages  # noqa: E402
+from nwws_bus import parse_nwws_product  # noqa: E402
 from source_scoreboard import summarize  # noqa: E402
 
 
@@ -97,6 +98,27 @@ class CssWxBridgeTests(unittest.TestCase):
         """
         seen = datetime(2026, 9, 11, 17, 53, 5, tzinfo=timezone.utc)
         self.assertEqual(decode_csswx_message(xml, seen), [])
+
+
+class NwwsNormalizationTests(unittest.TestCase):
+    def test_collective_dsm_and_metar_use_shared_decoders(self):
+        seen = datetime(2026, 9, 11, 21, 16, tzinfo=timezone.utc)
+        text = (
+            "CDUS27 KZNY 112116\n"
+            "KPHL DS 2115 11/09 821500/ /\n"
+            "KPHL 112154Z 18005KT 10SM CLR 25/10 A3000 RMK AO2 T02500100\n"
+        )
+        evs = parse_nwws_product(text, ttaaii="CDUS27", seen_ts=seen)
+        self.assertEqual({e.channel for e in evs}, {"dsm", "metar"})
+        self.assertTrue(all(e.station == "KPHL" for e in evs))
+        self.assertTrue(all(e.detail.startswith("nwws:CDUS27") for e in evs))
+
+    def test_month_rollover_metar_is_resolved_by_shared_parser(self):
+        seen = datetime(2026, 10, 1, 0, 2, tzinfo=timezone.utc)
+        text = "KDEN 302353Z 18005KT 10SM CLR 20/10 A3000 RMK AO2 T02000100"
+        evs = parse_nwws_product(text, ttaaii="SAUS", seen_ts=seen)
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].obs_ts, datetime(2026, 9, 30, 23, 53, tzinfo=timezone.utc))
 
 
 class FixCodecTests(unittest.TestCase):
