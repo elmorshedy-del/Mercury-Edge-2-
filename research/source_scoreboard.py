@@ -1,11 +1,11 @@
 """Human-readable Mercury source latency scoreboard.
 
 Usage:
-    PYTHONPATH=engine python research/source_scoreboard.py /data/source_race.jsonl
+    PYTHONPATH=engine python research/source_scoreboard.py /data/source_race_v2.jsonl
 
-Design goal: one screen, no ambiguous startup/backfill races. A record is treated
-as fresh only when ``warm_start is False`` explicitly. Older rows that predate
-that field are not silently promoted to fresh data.
+Design goal: one screen, no ambiguous startup/backfill races. V2 rows must have
+``measurement_valid=true``. Older rows are accepted only when they explicitly
+say ``warm_start=false``; missing freshness metadata is never guessed.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-DEFAULT = Path("/data/source_race.jsonl")
+DEFAULT = Path("/data/source_race_v2.jsonl")
 
 
 def load(path: Path) -> list[dict]:
@@ -69,9 +69,14 @@ def verdict(median_s: float | None, n: int) -> str:
     return "BACKUP ONLY"
 
 
+def _valid_row(r: dict) -> bool:
+    if "measurement_valid" in r:
+        return r.get("measurement_valid") is True
+    return r.get("warm_start") is False
+
+
 def summarize(rows: list[dict]) -> dict[str, list[dict]]:
-    # Explicit False only. Missing flags from old probe versions are unknown.
-    fresh = [r for r in rows if r.get("warm_start") is False]
+    fresh = [r for r in rows if _valid_row(r)]
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for r in fresh:
         grouped[(family(str(r.get("channel", ""))), str(r["source"]))].append(r)
