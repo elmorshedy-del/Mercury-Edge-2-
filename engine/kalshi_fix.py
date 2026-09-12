@@ -1,19 +1,13 @@
 """Minimal persistent KalshiNR FIX order transport for Mercury.
 
-Not wired into production. This module is designed to be enabled only after a
-successful demo/production session test with the user's FIX entitlement.
+Not wired into production. Enable only after a successful FIX entitlement/demo
+session test.
 
-Current Kalshi documentation (FIXT.1.1 / FIX50SP2):
-- host mm.fix.elections.kalshi.com:8228
-- TargetCompID KalshiNR (order entry, no retransmission)
-- TLS 1.2+
-- SenderCompID is the FIX API key UUID
-- NR logon requires ResetSeqNumFlag<141>=Y
-- Logon RawData<96> is an RSA-PSS signature
-- NewOrderSingle<35=D>, IOC<59=3>, ClOrdID<11> for idempotency
-
-The existing authenticated WebSocket remains the market-data cache. FIX is only
-for the proof->order hot path here.
+Mercury's ``SELL_YES`` maps to Kalshi's canonical no/ask direction. Kalshi's
+order-direction docs state that sell-yes and buy-no both produce outcome_side=no
+(book_side=ask), while direction does not change the order price. FIX Side<54>
+uses ``2=Sell (No)``, so the hot-path IOC uses Side=2 with the same yes-leg price
+that Mercury's strategy selected.
 """
 from __future__ import annotations
 
@@ -26,7 +20,6 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -39,6 +32,7 @@ SOH = "\x01"
 HOST = os.getenv("KALSHI_FIX_HOST", "mm.fix.elections.kalshi.com")
 PORT = int(os.getenv("KALSHI_FIX_PORT", "8228"))
 TARGET = os.getenv("KALSHI_FIX_TARGET", "KalshiNR")
+TERMINAL_EXEC_TYPES = {"F", "4", "8", "C"}  # Trade, Canceled, Rejected, Expired
 
 
 def utc_fix_time(now: datetime | None = None) -> str:
@@ -96,9 +90,8 @@ class FixResult:
 class KalshiFixOrderSession:
     """One hot KalshiNR TLS/FIX session.
 
-    One API key may have only one active FIX connection, so this object owns the
-    whole session. It reconnects serially; overlapping reconnect attempts are
-    never spawned.
+    Kalshi allows one active FIX connection per API key, so reconnect attempts
+    are serialized inside this object rather than spawned concurrently.
     """
 
     def __init__(self, signer: KalshiSigner | None = None):
@@ -127,13 +120,14 @@ class KalshiFixOrderSession:
         return bool(self.sock and self._logged_on.is_set())
 
     def _header(self, msg_type: str, sending_time: str | None = None) -> list[tuple[int, str]]:
+        """Return Kalshi's documented standard-header ordering after tags 8/9."""
         ts = sending_time or utc_fix_time()
         with self._lock:
             seq = self.seq
             self.seq += 1
         return [
-            (35, msg_type), (34, str(seq)), (49, self.sender),
-            (56, self.target), (52, ts),
+            (35, msg_type), (49, self.sender), (56, self.target),
+            (34, str(seq)), (52, ts),
         ]
 
     def _logon_signature(self, sending_time: str, seq: int) -> str:
@@ -173,16 +167,16 @@ class KalshiFixOrderSession:
         sock.settimeout(1.0)
         self.sock = sock
 
-        # Build logon manually so the signature's seq/time exactly equal tags.
+        # Build Logon manually so signature seq/time exactly match tags 34/52.
         sending_time = utc_fix_time()
         seq = self.seq
         self.seq += 1
         signature = self._logon_signature(sending_time, seq)
         fields = [
-            (35, "A"), (34, str(seq)), (49, self.sender), (56, self.target),
-            (52, sending_time), (98, "0"), (96, signature),
-            (108, str(self.heartbeat_s)), (1137, "9"), (141, "Y"),
-            (8013, "N"), (21011, "Y"),
+            (35, "A"), (49, self.sender), (56, self.target),
+            (34, str(seq)), (52, sending_time),
+            (98, "0"), (96, signature), (108, str(self.heartbeat_s)),
+            (1137, "9"), (141, "Y"), (8013, "N"), (21011, "Y"),
         ]
         self._send_fields(fields)
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
@@ -204,9 +198,9 @@ class KalshiFixOrderSession:
 
     def _session_reply(self, fields: dict[str, str]) -> None:
         typ = fields.get("35")
-        if typ == "0":  # Heartbeat
+        if typ == "0":
             return
-        if typ == "1":  # TestRequest
+        if typ == "1":
             hdr = self._header("0")
             req = fields.get("112")
             if req:
@@ -240,14 +234,22 @@ class KalshiFixOrderSession:
                     if typ in {"0", "1", "5"}:
                         self._session_reply(f)
                         continue
-                    if typ == "8":  # ExecutionReport
+                    if typ == "3":
+                        log.error("Kalshi FIX session reject: %s", f.get("58", ""))
+                        continue
+                    if typ == "8":
                         clid = f.get("11")
-                        if clid:
-                            pending = self._pending.get(clid)
-                            if pending:
-                                _sent, event, reports = pending
-                                reports.append(f)
-                                event.set()
+                        if not clid:
+                            continue
+                        pending = self._pending.get(clid)
+                        if not pending:
+                            continue
+                        _sent, event, reports = pending
+                        reports.append(f)
+                        # Do not wake execute() on PendingNew/New. For IOC, wait
+                        # until a trade or terminal cancel/reject/expiry arrives.
+                        if f.get("150") in TERMINAL_EXEC_TYPES:
+                            event.set()
         except Exception as exc:
             if not self._stop.is_set():
                 log.warning("Kalshi FIX reader ended: %s", exc)
@@ -269,12 +271,12 @@ class KalshiFixOrderSession:
                 (11, clid),
                 (38, f"{float(intent.max_size):.2f}"),
                 (40, "2"),             # Limit
-                (54, "2"),             # Sell / No-side equivalent
+                (54, "2"),             # SELL_YES -> no/ask outcome direction
                 (55, intent.ticker),
-                (44, str(int(intent.min_px))),
+                (44, str(int(intent.min_px))),  # price scale does not flip
                 (59, "3"),             # IOC
                 (2964, "1"),           # Taker-at-cross STP
-                (21006, "Y"),           # cancel on pause
+                (21006, "Y"),           # Cancel on pause
             ]
             self._send_fields(fields)
             if not event.wait(timeout_s):
@@ -282,10 +284,14 @@ class KalshiFixOrderSession:
             report = reports[-1]
             elapsed = (time.perf_counter() - sent) * 1000.0
             exec_type = report.get("150", "")
-            status = {
-                "0": "NEW", "F": "TRADE", "4": "CANCELED", "8": "REJECTED",
-                "A": "PENDING_NEW", "C": "EXPIRED",
-            }.get(exec_type, f"EXEC_{exec_type or 'UNKNOWN'}")
+            text = report.get("58", "")
+            if exec_type == "8" and text == "EXCHANGE_UNAVAILABLE":
+                status = "AMBIGUOUS_EXCHANGE_UNAVAILABLE"
+            else:
+                status = {
+                    "F": "TRADE", "4": "CANCELED", "8": "REJECTED",
+                    "C": "EXPIRED",
+                }.get(exec_type, f"EXEC_{exec_type or 'UNKNOWN'}")
             return FixResult(clid, status, report, round(elapsed, 3))
         finally:
             self._pending.pop(clid, None)
