@@ -87,7 +87,13 @@ SIXHR = re.compile(r'\b1([01])(\d{3})\b')
 
 class MetarFeed:
     """aviationweather.gov raw METARs. T-group = exact whole F 'current temp'
-    (proves max >= that value). 6-hr groups at 00/06/12/18Z prove window max."""
+    (proves max >= that value). 6-hr groups at 00/06/12/18Z prove window max.
+
+    A six-hour maximum is promoted to day-specific hard proof only when its
+    entire synoptic window belongs to one local-standard-time climate date.
+    Cross-midnight windows are held because the 1snTxTxTx group does not encode
+    when inside the six-hour window the maximum occurred.
+    """
     def __init__(self, icao: str, lst_offset_h: int):
         self.icao, self.lst = icao, lst_offset_h
         self._seen: set[str] = set()
@@ -119,16 +125,26 @@ class MetarFeed:
             if t:
                 c10 = int(t.group(2)) / 10.0 * (-1 if t.group(1) == "1" else 1)
                 out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, raw[:60]))
-            # synoptic reports are stamped :51-:56 of the PRIOR hour (1751Z carries
-            # the 18Z-cycle groups) — detect by rounding forward 15 minutes
-            if (obs + timedelta(minutes=15)).hour in (0, 6, 12, 18):
+            # Synoptic reports are stamped :51-:56 of the PRIOR hour (1751Z
+            # carries the 18Z-cycle groups). Round forward to the nominal cycle
+            # boundary, then require the entire preceding 6h window to stay
+            # inside one LST climate date before treating the max as hard proof.
+            cycle_end = (obs + timedelta(minutes=15)).replace(minute=0, second=0, microsecond=0)
+            if cycle_end.hour in (0, 6, 12, 18):
                 s = SIXHR.search(raw)
                 if s:
+                    window_start = cycle_end - timedelta(hours=6)
+                    start_date = self._climate_date(window_start)
+                    end_date = self._climate_date(cycle_end - timedelta(microseconds=1))
+                    if start_date != end_date:
+                        log.info(
+                            "sixhr held: %s %sZ-%sZ crosses climate midnight (%s/%s)",
+                            self.icao, window_start.strftime("%d%H%M"),
+                            cycle_end.strftime("%d%H%M"), start_date, end_date)
+                        continue
                     c10 = int(s.group(2)) / 10.0 * (-1 if s.group(1) == "1" else 1)
-                    # 6-hr window can straddle the LST midnight — attribute to the
-                    # climate date of (obs - 3h) which is inside the window.
-                    cd6 = self._climate_date(obs - timedelta(hours=3))
-                    out.append(ProofEvent(self.icao, cd6, c10_to_f(c10), "sixhr", obs, now, raw[:60]))
+                    out.append(ProofEvent(self.icao, start_date, c10_to_f(c10),
+                                          "sixhr", obs, now, raw[:60]))
         return out
 
 # --------------------------------------------------------------- OMO
