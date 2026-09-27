@@ -169,6 +169,15 @@ async def _validate_twilio_auth() -> None:
 
 @app.on_event("startup")
 async def start_shadow_collectors() -> None:
+    # Surface persisted voice outcomes from the previous call before any new
+    # collector work. This is read-only diagnostics.
+    for record in _tail_jsonl(os.getenv("MERCURY_VOICE_LOG", "/data/asos_voice_shadow.jsonl"), limit=8):
+        log.warning(
+            "Persisted voice result source=%s station=%s level_f=%s obs_ts=%s received_ts=%s obs_to_seen_ms=%s status=%s duration_s=%s",
+            record.get("source"), record.get("station"), record.get("level_f"),
+            record.get("obs_ts"), record.get("received_ts"), record.get("obs_to_seen_ms"),
+            record.get("status"), record.get("duration_s"),
+        )
     asyncio.create_task(run_synoptic_shadow())
     asyncio.create_task(_validate_twilio_auth())
     asyncio.create_task(_delayed_shadow_start())
