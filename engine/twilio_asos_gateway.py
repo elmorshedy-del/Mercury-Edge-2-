@@ -142,6 +142,25 @@ async def _validate_twilio_auth() -> None:
             )
         if response.status_code == 200:
             log.warning("Twilio auth check OK; paid calling remains disabled unless autocall is enabled")
+            try:
+                calls = await client.get(
+                    f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls.json",
+                    auth=(sid, token),
+                    params={"PageSize": "5"},
+                )
+                if calls.status_code == 200:
+                    items = calls.json().get("calls", [])
+                    for item in items[:5]:
+                        log.warning(
+                            "Twilio recent call sid=%s status=%s direction=%s start=%s end=%s duration=%s to=%s",
+                            item.get("sid"), item.get("status"), item.get("direction"),
+                            item.get("start_time"), item.get("end_time"), item.get("duration"),
+                            str(item.get("to") or "")[-4:],
+                        )
+                else:
+                    log.warning("Twilio recent-call check failed status=%s", calls.status_code)
+            except Exception as exc:
+                log.warning("Twilio recent-call check error: %s", str(exc)[:160])
         else:
             log.warning("Twilio auth check failed status=%s", response.status_code)
     except Exception as exc:
