@@ -1,11 +1,11 @@
 """Experimental Twilio transport for direct ASOS telephone OMO.
 
-No call is placed here. Speech becomes a proof only through the fail-closed ASOS
-voice parser. In shadow mode, valid proofs are timestamped to JSONL even when no
-local trading proof bus is attached.
+Shadow-only gateway: valid voice proofs and source-latency observations are
+written to JSONL. Trading remains disabled when MERCURY_VOICE_REQUIRE_BUS=0.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -21,6 +21,8 @@ from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDiscon
 
 from asos_voice import parse_voice_transcript
 from proof_bus import send_proof
+from synoptic_shadow import run_synoptic_shadow
+from twilio_shadow import launch_shadow_calls
 
 log = logging.getLogger("twilio_asos")
 HERE = Path(__file__).resolve().parent
@@ -31,8 +33,13 @@ _TRANSCRIPTS: dict[str, deque[tuple[float, str]]] = defaultdict(lambda: deque(ma
 _LOCK = threading.RLock()
 
 
-def _public_base(request: Request) -> str:
-    return os.getenv("MERCURY_VOICE_PUBLIC_BASE", "").rstrip("/") or str(request.base_url).rstrip("/")
+def _public_base(request: Request | None = None) -> str:
+    configured = os.getenv("MERCURY_VOICE_PUBLIC_BASE", "").rstrip("/")
+    if configured:
+        return configured
+    if request is None:
+        return ""
+    return str(request.base_url).rstrip("/")
 
 
 def _escape(s: str) -> str:
@@ -103,10 +110,32 @@ def _emit_if_valid(icao: str, call_sid: str, transcript: str, received_ts: datet
     return {"accepted": False, "reason": "no_fresh_unambiguous_proof"}
 
 
+async def _delayed_shadow_start() -> None:
+    await asyncio.sleep(8)
+    base = _public_base()
+    if not base:
+        log.warning("voice autocall disabled: MERCURY_VOICE_PUBLIC_BASE missing")
+        return
+    await launch_shadow_calls(BY_ICAO, base)
+
+
+@app.on_event("startup")
+async def start_shadow_collectors() -> None:
+    asyncio.create_task(run_synoptic_shadow())
+    asyncio.create_task(_delayed_shadow_start())
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "shadow": os.getenv("MERCURY_VOICE_REQUIRE_BUS", "1") in {"0", "false", "no"},
-            "stations": sorted(k for k, v in BY_ICAO.items() if v.get("asos_phone"))}
+    return {
+        "ok": True,
+        "shadow": os.getenv("MERCURY_VOICE_REQUIRE_BUS", "1") in {"0", "false", "no"},
+        "stations": sorted(k for k, v in BY_ICAO.items() if v.get("asos_phone")),
+        "synoptic": bool(os.getenv("SYNOPTIC_API_KEY", "").strip()),
+        "twilio_autocall": os.getenv("MERCURY_VOICE_AUTOCALL", "0").lower() in {"1", "true", "yes"},
+        "twilio_daily_cap_s": int(os.getenv("MERCURY_VOICE_DAILY_CAP_S", "600")),
+        "trading": False,
+    }
 
 
 @app.api_route("/twilio/answer/{icao}", methods=["GET", "POST"])
@@ -115,16 +144,29 @@ async def twilio_answer(icao: str, request: Request, mode: str = "transcription"
     if icao not in BY_ICAO or not BY_ICAO[icao].get("asos_phone"):
         return Response("unknown station", status_code=404)
     base = _public_base(request)
+    pause_s = max(30, min(600, int(os.getenv("MERCURY_VOICE_CALL_TIME_LIMIT_S", "300")))) + 5
     if mode == "media":
         stream = _escape(f"{_ws_base(base)}/twilio/media/{icao}")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Stream url="{stream}" track="inbound_track" /></Start><Pause length="300" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8">\n<Response><Start><Stream url="{stream}" track="inbound_track" /></Start><Pause length="{pause_s}" /></Response>'''
     elif mode == "transcription":
         callback = _escape(f"{base}/twilio/transcription/{icao}")
         hints = _escape("automated weather observation,temperature,celsius,zulu,zero,one,two,three,four,five,six,seven,eight,niner,minus")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="300" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8">\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="{pause_s}" /></Response>'''
     else:
         return Response("mode must be transcription or media", status_code=400)
     return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/twilio/status/{icao}")
+async def twilio_status(icao: str, CallSid: str = Form(default=""), CallStatus: str = Form(default=""),
+                        CallDuration: str = Form(default=""), Timestamp: str = Form(default="")):
+    record = {
+        "source": "twilio-status", "station": icao.upper(), "call_sid": CallSid,
+        "status": CallStatus, "duration_s": int(CallDuration) if CallDuration.isdigit() else None,
+        "provider_ts": Timestamp or None, "received_ts": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_shadow(record)
+    return {"ok": True}
 
 
 @app.post("/twilio/transcription/{icao}")
