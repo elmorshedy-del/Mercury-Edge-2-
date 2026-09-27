@@ -295,6 +295,14 @@ at approximately **23:36:54.506Z**, about **54.5 s after 23:36:00Z**.
 
 That is useful evidence that the spoken valid minute can advance well before the hourly METAR. However, the matching 23:36 temperature had not yet been independently paired in a safe same-loop proof at that exact time, so **54.5 s is not counted as a temperature-proof latency**.
 
+### Audit correction: invalidated pre-fix rows
+
+The persistent `/data/asos_voice_shadow.jsonl` contains two pre-fix accepted rows for `KLAX 23:36Z` around `23:36:54.38–54.39Z` (reported latency ~54.4 s). **These rows are invalidated for latency analysis.**
+
+Reason: they were created before the loop-boundary parser fix and could pair the new `23:36Z` header with the previous `23:35Z` temperature. They must not be counted as confirmed temperature proofs or source-race wins.
+
+The confirmed safe smoke-test evidence remains the `23:35Z / 25°C / 77°F` observation. Future runs use the loop-boundary-safe parser.
+
 ### Parser bug found and fixed
 
 The first live implementation could accidentally combine:
