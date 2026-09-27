@@ -25,9 +25,25 @@
 
 Listen-only tests on an upgraded Twilio account. Goal: hear the current clock-minute temperature as early as possible, keep coverage when the box drops the call, and see if the voice feed is a 1-minute observation rather than the hourly METAR.
 
-From: +16602439589 (PN65078e22bc42686fa01bae8aa8f0b4c9)  
-Account: Full, not trial  
-Method: outbound PSTN + recording + word-level ASR (Vosk). Clock = call start_time + recording offset. No Media Streams. Credentials were not saved.
+### Exact Grok transport / measurement method
+
+**This historical Grok work did not use Railway or DigitalOcean.**
+
+- API requests were issued directly from Grok's execution environment with `curl` against `api.twilio.com`.
+- Twilio's own network originated the PSTN leg.
+- From: +16602439589 (PN65078e22bc42686fa01bae8aa8f0b4c9).
+- Twilio account was full/upgraded, not trial.
+- Audio capture used **Twilio Recordings**.
+- After the call, the recording was downloaded into the execution environment.
+- Speech recognition used **Vosk word-level ASR**.
+- Event clock = Twilio call `start_time` + word/recording offset.
+- **No Twilio Media Streams WebSocket.**
+- **No Railway application server.**
+- **No DigitalOcean host.**
+- Railway was available as a tool/skill but was not used for these Grok phone experiments.
+- Credentials were not saved by Grok.
+
+This distinction is important: the Grok timing data came from post-call recording analysis with word-level timestamps, whereas Mercury's 2026-09-27 reproduction used a live Railway callback/transcription path. The two pipelines have different measurement and transport overheads and must not be treated as directly interchangeable.
 
 US outbound voice is $0.014 / connected minute. Number rent is $1.15 / month. Unanswered calls did not bill talk time.
 
@@ -244,6 +260,23 @@ Grok's proposed next measurement: a DEN :00 grid (three minutes), not more LAX :
 ---
 
 # MERCURY-REPRODUCED evidence
+
+## Methodology difference vs Grok baseline
+
+The Mercury reproduction below intentionally used a **different transport** from Grok:
+
+- Mercury: Twilio outbound PSTN → live Twilio transcription callbacks → Railway parser.
+- Grok baseline: direct Twilio REST call → Twilio Recording → download recording → Vosk word timestamps.
+
+Therefore:
+
+1. Grok's word timestamps may be better for reconstructing the exact moment a word was heard on the PSTN audio.
+2. Mercury live callback arrival includes transcription/callback processing delay and is not automatically equivalent to acoustic hear-time.
+3. A future controlled comparison should run the **same call with Twilio Recording enabled** while also collecting the live path, then compare:
+   - acoustic word time from recording,
+   - live transcription callback time,
+   - parsed-proof time.
+4. Claims about call drops should be reproduced under the direct-recording method before attributing them to Railway, Media Streams, or the ASOS box itself.
 
 ## 2026-09-27 KLAX 60-second smoke test
 
