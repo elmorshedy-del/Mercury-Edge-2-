@@ -76,17 +76,21 @@ async def launch_shadow_calls(by_icao: dict[str, dict], public_base: str) -> Non
     api = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls.json"
     async with httpx.AsyncClient(timeout=20.0) as client:
         for icao in stations:
+            log.warning("Twilio smoke step=station station=%s", icao)
             cfg = by_icao.get(icao)
             if not cfg or not cfg.get("asos_phone"):
                 log.warning("Skipping %s: no working ASOS phone configured", icao)
                 continue
+            log.warning("Twilio smoke step=reserve_before station=%s seconds=%s cap=%s", icao, per_call, daily_cap)
             ok, ledger = await asyncio.to_thread(_reserve, icao, per_call, daily_cap)
+            log.warning("Twilio smoke step=reserve_after station=%s ok=%s reserved=%s", icao, ok, ledger.get("reserved_seconds", 0))
             if not ok:
                 log.info("Twilio daily shadow cap reached: %ss reserved", ledger.get("reserved_seconds", 0))
                 break
             answer_url = f"{public_base.rstrip('/')}/twilio/answer/{icao}?mode={mode}"
             status_url = f"{public_base.rstrip('/')}/twilio/status/{icao}"
             try:
+                log.warning("Twilio smoke step=post_before station=%s", icao)
                 response = await client.post(
                     api,
                     auth=(account_sid, auth_token),
@@ -102,6 +106,7 @@ async def launch_shadow_calls(by_icao: dict[str, dict], public_base: str) -> Non
                         "StatusCallbackEvent": "initiated ringing answered completed",
                     },
                 )
+                log.warning("Twilio smoke step=post_after station=%s status=%s", icao, response.status_code)
                 response.raise_for_status()
                 body = response.json()
                 log.info("Twilio shadow call placed station=%s sid=%s status=%s cap=%ss",
