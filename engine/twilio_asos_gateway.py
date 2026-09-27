@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 CFG = json.load(open(HERE / "config.json"))
 BY_ICAO = {c["icao"]: c for c in CFG["cities"].values()}
 app = FastAPI(title="Mercury ASOS Voice Gateway")
-_TRANSCRIPTS: dict[str, deque[tuple[float, str]]] = defaultdict(lambda: deque(maxlen=16))
+_TRANSCRIPTS: dict[str, deque[tuple[float, str]]] = defaultdict(lambda: deque(maxlen=64))
 _LOCK = threading.RLock()
 
 
@@ -58,11 +58,11 @@ def _candidate_text(call_sid: str, newest: str) -> list[str]:
     with _LOCK:
         q = _TRANSCRIPTS[call_sid]
         q.append((now, newest.strip()))
-        while q and now - q[0][0] > 45:
+        while q and now - q[0][0] > 90:
             q.popleft()
         recent = [t for _, t in q if t]
     texts = [newest.strip()]
-    for n in range(2, min(8, len(recent)) + 1):
+    for n in range(2, min(24, len(recent)) + 1):
         texts.append(" ".join(recent[-n:]))
     return list(dict.fromkeys(x for x in texts if x))
 
@@ -209,7 +209,7 @@ async def twilio_answer(icao: str, request: Request, mode: str = "transcription"
     elif mode == "transcription":
         callback = _escape(f"{base}/twilio/transcription/{icao}")
         hints = _escape("automated weather observation,temperature,celsius,zulu,zero,one,two,three,four,five,six,seven,eight,niner,minus")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="{pause_s}" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="false" languageCode="en-US" profanityFilter="false" transcriptionEngine="google" speechModel="telephony" hints="{hints}" /></Start><Pause length="{pause_s}" /></Response>'''
     else:
         return Response("mode must be transcription or media", status_code=400)
     return Response(content=twiml, media_type="application/xml")
@@ -230,16 +230,25 @@ async def twilio_status(icao: str, CallSid: str = Form(default=""), CallStatus: 
 @app.post("/twilio/transcription/{icao}")
 async def twilio_transcription(icao: str, CallSid: str = Form(default=""), Timestamp: str = Form(default=""),
                                TranscriptionData: str = Form(default=""), TranscriptionEvent: str = Form(default=""),
-                               Stability: str = Form(default="")):
+                               Stability: str = Form(default=""), Final: str = Form(default="")):
     try:
         payload = json.loads(TranscriptionData or "{}")
     except json.JSONDecodeError:
         payload = {}
     transcript = str(payload.get("transcript") or payload.get("text") or "").strip()
     now = datetime.now(timezone.utc)
+    if TranscriptionEvent == "transcription-content" and transcript:
+        log.warning(
+            "Twilio transcript station=%s final=%s text=%s",
+            icao.upper(), Final, transcript[:320].replace("\n", " "),
+        )
     out = _emit_if_valid(icao.upper(), CallSid or "unknown", transcript, now)
+    log.warning(
+        "Twilio parser station=%s accepted=%s reason=%s level_f=%s obs_ts=%s",
+        icao.upper(), out.get("accepted"), out.get("reason"), out.get("level_f"), out.get("obs_ts"),
+    )
     out.update({"event": TranscriptionEvent, "stability": Stability or None,
-                "received_ts": now.isoformat(), "provider_ts": Timestamp or None})
+                "final": Final or None, "received_ts": now.isoformat(), "provider_ts": Timestamp or None})
     return out
 
 
