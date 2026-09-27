@@ -147,11 +147,11 @@ async def twilio_answer(icao: str, request: Request, mode: str = "transcription"
     pause_s = max(30, min(600, int(os.getenv("MERCURY_VOICE_CALL_TIME_LIMIT_S", "300")))) + 5
     if mode == "media":
         stream = _escape(f"{_ws_base(base)}/twilio/media/{icao}")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8">\n<Response><Start><Stream url="{stream}" track="inbound_track" /></Start><Pause length="{pause_s}" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Stream url="{stream}" track="inbound_track" /></Start><Pause length="{pause_s}" /></Response>'''
     elif mode == "transcription":
         callback = _escape(f"{base}/twilio/transcription/{icao}")
         hints = _escape("automated weather observation,temperature,celsius,zulu,zero,one,two,three,four,five,six,seven,eight,niner,minus")
-        twiml = f'''<?xml version="1.0" encoding="UTF-8">\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="{pause_s}" /></Response>'''
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>\n<Response><Start><Transcription statusCallbackUrl="{callback}" track="inbound_track" partialResults="true" languageCode="en-US" profanityFilter="false" hints="{hints}" /></Start><Pause length="{pause_s}" /></Response>'''
     else:
         return Response("mode must be transcription or media", status_code=400)
     return Response(content=twiml, media_type="application/xml")
