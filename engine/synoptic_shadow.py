@@ -20,6 +20,7 @@ import websockets
 
 log = logging.getLogger("synoptic_shadow")
 _WRITE_LOCK = asyncio.Lock()
+_STDOUT_FIRST: set[tuple[str, str]] = set()
 
 
 def _utcnow() -> datetime:
@@ -42,6 +43,19 @@ async def _write(record: dict) -> None:
     line = json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
     async with _WRITE_LOCK:
         await asyncio.to_thread(_append, path, line)
+    # One-time, non-secret diagnostics make Railway logs sufficient to prove
+    # the collector is actually receiving data without exposing credentials.
+    source = str(record.get("source") or "")
+    marker = str(record.get("station") or record.get("event") or "")
+    key = (source, marker)
+    if source.startswith("synoptic") and key not in _STDOUT_FIRST:
+        _STDOUT_FIRST.add(key)
+        log.warning(
+            "Synoptic shadow sample source=%s station=%s event=%s obs_ts=%s seen_ts=%s obs_to_seen_ms=%s latency_min=%s",
+            source, record.get("station"), record.get("event"), record.get("obs_ts"),
+            record.get("seen_ts") or record.get("queried_ts"), record.get("obs_to_seen_ms"),
+            record.get("synoptic_latency_min"),
+        )
 
 
 def _append(path: Path, line: str) -> None:
