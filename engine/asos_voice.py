@@ -57,12 +57,11 @@ def _digit_sequence(tokens: list[str]) -> int | None:
     return sign * int("".join(digits))
 
 
-def _spoken_zulu(tokens: list[str]) -> tuple[int, int] | None:
-    """Find the final four spoken digits immediately preceding 'zulu'."""
+def _spoken_zulu(tokens: list[str]) -> tuple[int, int, int] | None:
+    """Find a valid spoken HHMM immediately preceding 'zulu', returning its token index."""
     for i, tok in enumerate(tokens):
         if tok != "zulu":
             continue
-        # Walk backwards collecting individual digits/numeric groups.
         collected: list[str] = []
         j = i - 1
         while j >= 0 and len(collected) < 4:
@@ -75,10 +74,10 @@ def _spoken_zulu(tokens: list[str]) -> tuple[int, int] | None:
                 break
             j -= 1
         if len(collected) >= 4:
-            s = "".join(reversed(collected[:4]))
-            hh, mm = int(s[:2]), int(s[2:])
+            value = "".join(reversed(collected[:4]))
+            hh, mm = int(value[:2]), int(value[2:])
             if 0 <= hh <= 23 and 0 <= mm <= 59:
-                return hh, mm
+                return hh, mm, i
     return None
 
 
@@ -99,9 +98,17 @@ def parse_voice_transcript(icao: str, lst_offset_h: int, transcript: str,
     if age < -30 or age > max_age_s:
         return None
 
+    # Fail closed across repeated phone loops: temperature must occur AFTER
+    # this observation's Zulu timestamp, and before the next observation header.
+    zulu_i = z[2]
+    next_header = len(tokens)
+    for i in range(zulu_i + 1, len(tokens)):
+        if tokens[i:i + 3] == ["automated", "weather", "observation"]:
+            next_header = i
+            break
     try:
-        ti = tokens.index("temperature")
-        ci = tokens.index("celsius", ti + 1)
+        ti = tokens.index("temperature", zulu_i + 1, next_header)
+        ci = tokens.index("celsius", ti + 1, next_header)
     except ValueError:
         return None
     temp_c = _digit_sequence(tokens[ti + 1:ci])
