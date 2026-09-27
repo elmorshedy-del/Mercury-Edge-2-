@@ -185,6 +185,34 @@ async def twilio_transcription(icao: str, CallSid: str = Form(default=""), Times
     return out
 
 
+def _tail_jsonl(path: str, limit: int = 8) -> list[dict]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()[-limit:]
+        return [json.loads(x) for x in lines if x.strip()]
+    except Exception:
+        return []
+
+
+@app.get("/shadow/status")
+def shadow_status():
+    budget_path = Path(os.getenv("MERCURY_VOICE_BUDGET_LEDGER", "/data/twilio_shadow_budget.json"))
+    try:
+        budget = json.loads(budget_path.read_text(encoding="utf-8")) if budget_path.exists() else {}
+    except Exception:
+        budget = {}
+    return {
+        "trading": False,
+        "voice": _tail_jsonl(os.getenv("MERCURY_VOICE_LOG", "/data/asos_voice_shadow.jsonl")),
+        "synoptic": _tail_jsonl(os.getenv("SYNOPTIC_LOG", "/data/synoptic_shadow.jsonl")),
+        "twilio_budget": budget,
+        "twilio_auth_configured": bool(os.getenv("TWILIO_AUTH_TOKEN", "").strip()),
+        "weather_source_configured": bool(os.getenv("WEATHERSOURCE_API_KEY", "").strip()),
+    }
+
+
 @app.websocket("/twilio/media/{icao}")
 async def twilio_media(icao: str, ws: WebSocket):
     icao = icao.upper()
