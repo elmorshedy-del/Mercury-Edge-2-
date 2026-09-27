@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
+
 from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDisconnect
 
 from asos_voice import parse_voice_transcript
@@ -119,9 +121,32 @@ async def _delayed_shadow_start() -> None:
     await launch_shadow_calls(BY_ICAO, base)
 
 
+async def _validate_twilio_auth() -> None:
+    """Read-only credential check; never places a call."""
+    await asyncio.sleep(3)
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    if not sid or not token:
+        log.warning("Twilio auth check skipped: credentials incomplete")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"https://api.twilio.com/2010-04-01/Accounts/{sid}.json",
+                auth=(sid, token),
+            )
+        if response.status_code == 200:
+            log.warning("Twilio auth check OK; paid calling remains disabled unless autocall is enabled")
+        else:
+            log.warning("Twilio auth check failed status=%s", response.status_code)
+    except Exception as exc:
+        log.warning("Twilio auth check error: %s", str(exc)[:160])
+
+
 @app.on_event("startup")
 async def start_shadow_collectors() -> None:
     asyncio.create_task(run_synoptic_shadow())
+    asyncio.create_task(_validate_twilio_auth())
     asyncio.create_task(_delayed_shadow_start())
 
 
