@@ -38,6 +38,15 @@ class AsosVoiceTests(unittest.TestCase):
             seen_ts=seen,
         ))
 
+    def test_does_not_pair_new_zulu_with_previous_loop_temperature(self):
+        seen = datetime(2026, 9, 27, 23, 36, 54, tzinfo=timezone.utc)
+        text = (
+            "automated weather observation two three three five zulu "
+            "sky condition clear temperature two five celsius "
+            "automated weather observation two three three six zulu wind two four zero"
+        )
+        self.assertIsNone(parse_voice_transcript("KLAX", -8, text, seen_ts=seen))
+
     def test_negative_temperature(self):
         seen = datetime(2026, 1, 11, 12, 0, 20, tzinfo=timezone.utc)
         text = (
