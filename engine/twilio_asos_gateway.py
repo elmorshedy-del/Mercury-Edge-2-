@@ -114,11 +114,16 @@ def _emit_if_valid(icao: str, call_sid: str, transcript: str, received_ts: datet
 
 async def _delayed_shadow_start() -> None:
     await asyncio.sleep(8)
+    enabled = os.getenv("MERCURY_VOICE_AUTOCALL", "0").lower() in {"1", "true", "yes"}
+    log.warning("Twilio smoke startup autocall=%s", enabled)
     base = _public_base()
     if not base:
         log.warning("voice autocall disabled: MERCURY_VOICE_PUBLIC_BASE missing")
         return
-    await launch_shadow_calls(BY_ICAO, base)
+    try:
+        await launch_shadow_calls(BY_ICAO, base)
+    except Exception as exc:
+        log.exception("Twilio smoke startup failed: %s", exc)
 
 
 async def _validate_twilio_auth() -> None:
