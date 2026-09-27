@@ -210,16 +210,21 @@ async def _push_loop(token: str) -> None:
 
 
 async def run_synoptic_shadow() -> None:
-    api_key = os.getenv("SYNOPTIC_API_KEY", "").strip()
-    if not api_key:
-        log.info("Synoptic shadow disabled: SYNOPTIC_API_KEY missing")
-        return
-    try:
-        token = await _public_token(api_key)
-    except Exception as exc:
-        await _write({"source": "synoptic", "event": "auth_error",
-                      "seen_ts": _utcnow().isoformat(), "error": str(exc)[:240]})
-        return
+    # Public API tokens are the native credential for Synoptic data products.
+    # Prefer a directly configured token; retain the private-key exchange only
+    # as a backwards-compatible fallback.
+    token = os.getenv("SYNOPTIC_TOKEN", "").strip()
+    if not token:
+        api_key = os.getenv("SYNOPTIC_API_KEY", "").strip()
+        if not api_key:
+            log.info("Synoptic shadow disabled: SYNOPTIC_TOKEN/SYNOPTIC_API_KEY missing")
+            return
+        try:
+            token = await _public_token(api_key)
+        except Exception as exc:
+            await _write({"source": "synoptic", "event": "auth_error",
+                          "seen_ts": _utcnow().isoformat(), "error": str(exc)[:240]})
+            return
 
     latency_task = asyncio.create_task(_latency_loop(token))
     try:
