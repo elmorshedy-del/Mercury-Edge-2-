@@ -28,18 +28,28 @@ def _utcnow() -> datetime:
 
 
 def _stations() -> list[str]:
-    """HF-ASOS/OMO station IDs only.
-
-    Keep ordinary ASOS/AWOS stations out of this collector so 5-minute
-    HFMETAR/METAR observations cannot be mistaken for the 1-minute feed.
-    """
-    configured = [
-        x.strip().upper() for x in os.getenv(
+    """HF-ASOS/OMO station IDs only."""
+    raw = os.getenv(
+        "SYNOPTIC_HF_STATIONS",
+        os.getenv(
             "SYNOPTIC_STATIONS",
             "KNYC1M,KPHL1M,KDEN1M,KMDW1M,KAUS1M,KMIA1M,KLAX1M",
-        ).split(",") if x.strip()
-    ]
+        ),
+    )
+    configured = [x.strip().upper() for x in raw.split(",") if x.strip()]
     return [stid for stid in configured if stid.endswith("1M")]
+
+
+def _reference_stations() -> list[str]:
+    """Ordinary ASOS/AWOS IDs, kept separate from the HF-ASOS 1M lane."""
+    raw = os.getenv(
+        "SYNOPTIC_REFERENCE_STATIONS",
+        "KNYC,KPHL,KDEN,KMDW,KAUS,KMIA,KLAX",
+    )
+    return [
+        x.strip().upper() for x in raw.split(",")
+        if x.strip() and not x.strip().upper().endswith("1M")
+    ]
 
 
 def _log_path() -> Path:
@@ -58,7 +68,8 @@ async def _write(record: dict) -> None:
     marker = str(record.get("station") or record.get("event") or "")
     key = (source, marker)
     if source.startswith("synoptic") and (
-        source == "synoptic-hf-first-seen" or key not in _STDOUT_FIRST
+        source in {"synoptic-hf-first-seen", "synoptic-standard-first-seen"}
+        or key not in _STDOUT_FIRST
     ):
         _STDOUT_FIRST.add(key)
         log.warning(
@@ -257,6 +268,111 @@ async def _latest_loop(token: str) -> None:
         await asyncio.sleep(interval)
 
 
+async def _reference_loop(token: str) -> None:
+    """Collect ordinary Synoptic airport data as a separately labelled backup.
+
+    This lane may contain formal METAR/SPECI and 5-minute HFMETAR. It is never
+    labelled or scored as the dedicated 1-minute HF-ASOS feed.
+    """
+    interval = max(10, int(os.getenv("SYNOPTIC_REFERENCE_POLL_S", "15")))
+    seen: set[tuple[str, str]] = set()
+    baseline_complete = False
+    requested = _reference_stations()
+    last_missing: tuple[str, ...] | None = None
+
+    while True:
+        params = {
+            "token": token,
+            "stid": ",".join(requested),
+            "vars": "air_temp",
+            "within": "15",
+            "hfmetars": "1",
+            "showemptystations": "1",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    "https://api.synopticdata.com/v2/stations/latest", params=params
+                )
+                response.raise_for_status()
+                payload = response.json()
+
+            received = _utcnow()
+            summary = payload.get("SUMMARY") or {}
+            response_code = summary.get("RESPONSE_CODE")
+            if response_code not in {None, 1, "1"}:
+                await _write({
+                    "source": "synoptic-standard-poll",
+                    "event": "api_no_results",
+                    "seen_ts": received.isoformat(),
+                    "response_code": response_code,
+                    "message": str(summary.get("RESPONSE_MESSAGE") or "")[:240],
+                    "requested": requested,
+                })
+
+            returned: set[str] = set()
+            pending: list[dict] = []
+            for station in payload.get("STATION", []):
+                stid = str(station.get("STID") or "").upper()
+                if not stid:
+                    continue
+                returned.add(stid)
+                observations = station.get("OBSERVATIONS") or {}
+                for key, item in observations.items():
+                    if not key.startswith("air_temp") or not isinstance(item, dict):
+                        continue
+                    obs_s = str(item.get("date_time") or "")
+                    ident = (stid, obs_s)
+                    if not obs_s or ident in seen:
+                        continue
+                    seen.add(ident)
+                    obs = _parse_obs_ts(obs_s)
+                    pending.append({
+                        "station": stid,
+                        "obs_ts": obs_s,
+                        "value_c": item.get("value"),
+                        "seen_ts": received.isoformat(),
+                        "obs_to_seen_ms": (
+                            (received - obs).total_seconds() * 1000 if obs else None
+                        ),
+                        "poll_interval_s": interval,
+                    })
+
+            missing = tuple(sorted(set(requested) - returned))
+            if missing != last_missing:
+                last_missing = missing
+                await _write({
+                    "source": "synoptic-standard-poll",
+                    "event": "coverage",
+                    "seen_ts": received.isoformat(),
+                    "requested": requested,
+                    "returned": sorted(returned),
+                    "missing": list(missing),
+                })
+
+            if not baseline_complete:
+                baseline_complete = True
+                for record in pending:
+                    await _write({"source": "synoptic-standard-baseline", **record})
+                await _write({
+                    "source": "synoptic-standard-poll",
+                    "event": "baseline_complete",
+                    "seen_ts": received.isoformat(),
+                    "baseline_count": len(pending),
+                })
+            else:
+                for record in pending:
+                    await _write({"source": "synoptic-standard-first-seen", **record})
+        except Exception as exc:
+            await _write({
+                "source": "synoptic-standard-first-seen",
+                "event": "error",
+                "seen_ts": _utcnow().isoformat(),
+                "error": str(exc)[:240],
+            })
+        await asyncio.sleep(interval)
+
+
 async def _push_loop(token: str) -> None:
     query = urlencode({
         "stid": ",".join(_stations()),
@@ -319,6 +435,7 @@ async def run_synoptic_shadow() -> None:
             return
 
     latency_task = asyncio.create_task(_latency_loop(token))
+    reference_task = asyncio.create_task(_reference_loop(token))
     try:
         await _push_loop(token)
     except PermissionError as exc:
@@ -327,3 +444,4 @@ async def run_synoptic_shadow() -> None:
         await _latest_loop(token)
     finally:
         latency_task.cancel()
+        reference_task.cancel()
