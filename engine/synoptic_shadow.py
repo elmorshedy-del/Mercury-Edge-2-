@@ -62,10 +62,12 @@ async def _write(record: dict) -> None:
     ):
         _STDOUT_FIRST.add(key)
         log.warning(
-            "Synoptic shadow sample source=%s station=%s event=%s obs_ts=%s seen_ts=%s obs_to_seen_ms=%s latency_min=%s",
+            "Synoptic shadow sample source=%s station=%s event=%s obs_ts=%s seen_ts=%s "
+            "obs_to_seen_ms=%s latency_min=%s message=%s requested=%s returned=%s missing=%s",
             source, record.get("station"), record.get("event"), record.get("obs_ts"),
             record.get("seen_ts") or record.get("queried_ts"), record.get("obs_to_seen_ms"),
-            record.get("synoptic_latency_min"),
+            record.get("synoptic_latency_min"), record.get("message"),
+            record.get("requested"), record.get("returned"), record.get("missing"),
         )
 
 
