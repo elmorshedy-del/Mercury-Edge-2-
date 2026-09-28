@@ -28,9 +28,18 @@ def _utcnow() -> datetime:
 
 
 def _stations() -> list[str]:
-    return [x.strip().upper() for x in os.getenv(
-        "SYNOPTIC_STATIONS", "KDEN1M,KLAX1M,KPHL1M"
-    ).split(",") if x.strip()]
+    """HF-ASOS/OMO station IDs only.
+
+    Keep ordinary ASOS/AWOS stations out of this collector so 5-minute
+    HFMETAR/METAR observations cannot be mistaken for the 1-minute feed.
+    """
+    configured = [
+        x.strip().upper() for x in os.getenv(
+            "SYNOPTIC_STATIONS",
+            "KNYC1M,KPHL1M,KDEN1M,KMDW1M,KAUS1M,KMIA1M,KLAX1M",
+        ).split(",") if x.strip()
+    ]
+    return [stid for stid in configured if stid.endswith("1M")]
 
 
 def _log_path() -> Path:
@@ -48,7 +57,9 @@ async def _write(record: dict) -> None:
     source = str(record.get("source") or "")
     marker = str(record.get("station") or record.get("event") or "")
     key = (source, marker)
-    if source.startswith("synoptic") and key not in _STDOUT_FIRST:
+    if source.startswith("synoptic") and (
+        source == "synoptic-hf-first-seen" or key not in _STDOUT_FIRST
+    ):
         _STDOUT_FIRST.add(key)
         log.warning(
             "Synoptic shadow sample source=%s station=%s event=%s obs_ts=%s seen_ts=%s obs_to_seen_ms=%s latency_min=%s",
@@ -134,15 +145,25 @@ async def _latency_loop(token: str) -> None:
 
 
 async def _latest_loop(token: str) -> None:
-    """Low-rate fallback when Push Streaming is not included in the account."""
-    interval = max(15, int(os.getenv("SYNOPTIC_LATEST_POLL_S", "30")))
+    """Poll only the dedicated 1-minute HF-ASOS station IDs.
+
+    The first successful response establishes a baseline and is never scored as
+    first-seen latency. Only observations that appear on later polls are emitted
+    as live first-seen samples.
+    """
+    interval = max(10, int(os.getenv("SYNOPTIC_LATEST_POLL_S", "15")))
     seen: set[tuple[str, str]] = set()
+    baseline_complete = False
+    requested = _stations()
+    last_missing: tuple[str, ...] | None = None
+
     while True:
         params = {
             "token": token,
-            "stid": ",".join(_stations()),
+            "stid": ",".join(requested),
             "vars": "air_temp",
             "within": "15",
+            "showemptystations": "1",
         }
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -151,9 +172,27 @@ async def _latest_loop(token: str) -> None:
                 )
                 response.raise_for_status()
                 payload = response.json()
+
             received = _utcnow()
+            summary = payload.get("SUMMARY") or {}
+            response_code = summary.get("RESPONSE_CODE")
+            if response_code not in {None, 1, "1"}:
+                await _write({
+                    "source": "synoptic-hf-poll",
+                    "event": "api_no_results",
+                    "seen_ts": received.isoformat(),
+                    "response_code": response_code,
+                    "message": str(summary.get("RESPONSE_MESSAGE") or "")[:240],
+                    "requested": requested,
+                })
+
+            returned: set[str] = set()
+            pending: list[dict] = []
             for station in payload.get("STATION", []):
-                stid = str(station.get("STID") or "")
+                stid = str(station.get("STID") or "").upper()
+                if not stid:
+                    continue
+                returned.add(stid)
                 observations = station.get("OBSERVATIONS") or {}
                 for key, item in observations.items():
                     if not key.startswith("air_temp") or not isinstance(item, dict):
@@ -164,18 +203,55 @@ async def _latest_loop(token: str) -> None:
                         continue
                     seen.add(ident)
                     obs = _parse_obs_ts(obs_s)
-                    await _write({
-                        "source": "synoptic-latest-first-seen",
+                    pending.append({
                         "station": stid,
                         "obs_ts": obs_s,
                         "value_c": item.get("value"),
                         "seen_ts": received.isoformat(),
-                        "obs_to_seen_ms": ((received - obs).total_seconds() * 1000 if obs else None),
+                        "obs_to_seen_ms": (
+                            (received - obs).total_seconds() * 1000 if obs else None
+                        ),
                         "poll_interval_s": interval,
                     })
+
+            missing = tuple(sorted(set(requested) - returned))
+            if missing != last_missing:
+                last_missing = missing
+                await _write({
+                    "source": "synoptic-hf-poll",
+                    "event": "coverage",
+                    "seen_ts": received.isoformat(),
+                    "requested": requested,
+                    "returned": sorted(returned),
+                    "missing": list(missing),
+                })
+
+            if not baseline_complete:
+                baseline_complete = True
+                for record in pending:
+                    await _write({
+                        "source": "synoptic-hf-baseline",
+                        **record,
+                    })
+                await _write({
+                    "source": "synoptic-hf-poll",
+                    "event": "baseline_complete",
+                    "seen_ts": received.isoformat(),
+                    "baseline_count": len(pending),
+                })
+            else:
+                for record in pending:
+                    await _write({
+                        "source": "synoptic-hf-first-seen",
+                        **record,
+                    })
         except Exception as exc:
-            await _write({"source": "synoptic-latest-first-seen", "event": "error",
-                          "seen_ts": _utcnow().isoformat(), "error": str(exc)[:240]})
+            await _write({
+                "source": "synoptic-hf-first-seen",
+                "event": "error",
+                "seen_ts": _utcnow().isoformat(),
+                "error": str(exc)[:240],
+            })
         await asyncio.sleep(interval)
 
 
