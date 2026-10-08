@@ -6,6 +6,9 @@ No outbound HTTP, Kalshi calls, or orders.
 import os
 import sys
 import unittest
+import json
+import queue
+import threading
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -14,6 +17,7 @@ sys.path.insert(0, os.path.join(ROOT, "engine"))
 
 from datis import decode_page, DATISFeed
 from feeds import MetarFeed
+from minutetemp import decode_latest, MinuteTempStream
 
 
 def utc(h, m=0):
@@ -121,6 +125,60 @@ class StationFileTests(unittest.TestCase):
             evs = MetarFeed("KLAX", -8).poll(fast_only=True)
         self.assertEqual({ev.channel for ev in evs}, {"metar", "sixhr"})
         self.assertTrue(all(ev.climate_date.isoformat() == "2026-10-08" for ev in evs))
+
+
+class MinuteTempTests(unittest.TestCase):
+    def sample(self, stamp="2026-10-08T17:25:00Z"):
+        # Recorded shape of the minuteTemp KLAX paid WS observation on Oct 8.
+        return {
+            "type": "observation", "station_id": "KLAX",
+            "observed_at": stamp, "temperature_f": 78.8,
+            "temperature_c": 26, "temp_min_f": 77.9, "temp_max_f": 79.7,
+            "persistence_status": "uncommitted",
+        }
+
+    def test_minute_provider_floor_and_age(self):
+        packet = self.sample()
+        seen = datetime(2026, 10, 8, 17, 27, 14, tzinfo=timezone.utc)
+        ev = decode_latest({"data": {"station": {"station_id": "KLAX"},
+                                     "observation": packet}}, "KLAX", -8, seen)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.level_f, 77)
+        self.assertEqual(ev.channel, "omo_floor")
+        self.assertEqual((ev.seen_ts - ev.obs_ts).total_seconds(), 134)
+
+    def test_requires_minimum_interval_temperature(self):
+        seen = datetime(2026, 10, 8, 17, 27, tzinfo=timezone.utc)
+        packet = self.sample()
+        packet.pop("temp_min_f")
+        self.assertIsNone(decode_latest(
+            {"data": {"station": {"station_id": "KLAX"}, "observation": packet}},
+            "KLAX", -8, seen))
+
+    def test_rejects_vendor_carried_forward_and_stale(self):
+        seen = datetime(2026, 10, 8, 17, 27, tzinfo=timezone.utc)
+        packet = self.sample()
+        packet["is_locf"] = True
+        self.assertIsNone(decode_latest(
+            {"data": {"station": {"station_id": "KLAX"}, "observation": packet}},
+            "KLAX", -8, seen))
+        packet = self.sample("2026-10-08T16:30:00Z")
+        self.assertIsNone(decode_latest(
+            {"data": {"station": {"station_id": "KLAX"}, "observation": packet}},
+            "KLAX", -8, seen))
+
+    def test_websocket_event_deduplicates_preliminary_committed(self):
+        q = queue.Queue(maxsize=10)
+        ws = MinuteTempStream("dummy", {"KLAX": -8}, q, threading.Event())
+        packet = self.sample()
+        with patch("minutetemp.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 8, 17, 27, 14,
+                                           tzinfo=timezone.utc)
+            ws._on_message(json.dumps(packet))
+            packet["persistence_status"] = "committed"
+            ws._on_message(json.dumps(packet))
+        self.assertEqual(q.qsize(), 1)
+        self.assertTrue(q.get_nowait().detail.startswith("minutetemp-ws"))
 
 
 if __name__ == "__main__":
