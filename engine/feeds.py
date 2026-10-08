@@ -114,6 +114,7 @@ class MetarFeed:
             raise ValueError('Choose TGFTP or AWC, not both')
         selected = sources[:1] if fast_only else sources[1:] if awc_only else sources
         lines = []
+        failures = 0
         for source, url in selected:
             try:
                 body = _get(url, timeout=4).decode(errors="replace")
@@ -121,8 +122,14 @@ class MetarFeed:
                     if re.search(r"\b" + re.escape(self.icao) + r"\s+\d{6}Z\b", line):
                         lines.append((source, line.strip()))
             except Exception as e:
+                failures += 1
                 log.warning("METAR %s %s failed: %s", source, self.icao, e)
         if not lines:
+            if failures == len(selected) and (fast_only or awc_only):
+                # Runtime handles each lane independently. A broken provider
+                # must show an explicit error in source health rather than
+                # looking like a healthy feed with no new observation.
+                raise RuntimeError(f"METAR provider unavailable for {self.icao}")
             return []
         now = datetime.now(timezone.utc); out = []
         for source, raw in lines:
