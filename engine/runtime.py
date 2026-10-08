@@ -219,6 +219,10 @@ def loop(stop: threading.Event):
                     if city:
                         _handle(city, [ev])
                 status = "ok" if events else "no_new_proof"
+                if key.endswith(":datis"):
+                    city = next((c for c in CITIES if key.startswith(c.key + ":")), None)
+                    if city and city.datis and city.datis._fail_count:
+                        status = "upstream_error_backoff"
                 STATE["source_health"][key] = {
                     "status": status,
                     "completed_at": completed_at.isoformat(),

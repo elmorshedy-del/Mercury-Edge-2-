@@ -139,6 +139,9 @@ def api_status():
     today = datetime.now(timezone.utc).date().isoformat()
     return {"now": datetime.now(timezone.utc).isoformat(), "mode": st["mode"],
             "uptime_s": uptime, "cities": st["cities"], "last_poll": st["last_poll"],
+            "sources": st.get("sources", {}),
+            "source_health": st.get("source_health", {}),
+            "latest_proof": st.get("latest_proof", {}),
             "next_windows": windows[:8],
             "trades_total": len(led),
             "trades_today": sum(1 for t in led if t["ts"][:10] == today)}
