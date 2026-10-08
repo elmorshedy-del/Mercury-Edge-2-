@@ -8,7 +8,7 @@ Channels (measured live lags):
           measured availability 2.3 min typical (up to ~7)
 """
 from __future__ import annotations
-import re, gzip, io, json, logging, urllib.request
+import re, gzip, io, json, logging, time, urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, date as Date
 from decode import c10_to_f, kelvin_to_wholeC, wholeC_floor
@@ -97,11 +97,13 @@ class MetarFeed:
     def __init__(self, icao: str, lst_offset_h: int):
         self.icao, self.lst = icao, lst_offset_h
         self._seen: set[str] = set()
+        self._awc_next_retry = 0.0
+        self._awc_failures = 0
 
     def _climate_date(self, obs: datetime) -> Date:
         return (obs + timedelta(hours=self.lst)).date()
 
-    def poll(self, fast_only: bool = False) -> list[ProofEvent]:
+    def poll(self, fast_only: bool = False, awc_only: bool = False) -> list[ProofEvent]:
         # NOAA station-file lane won the measured KLAX METAR race against
         # minuteTemp NOAAPORT and AviationWeather (single observed cycle).
         # Keep AWC as a separate supplementary history/SPECI lane: TGFTP
@@ -110,15 +112,32 @@ class MetarFeed:
             ("tgftp", f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{self.icao}.TXT"),
             ("awc", f"https://aviationweather.gov/api/data/metar?ids={self.icao}&format=raw&hours=2"),
         )
+        if fast_only and awc_only:
+            raise ValueError("Choose only one METAR lane")
+        selected = sources[:1] if fast_only else sources[1:] if awc_only else sources
         lines = []
-        for source, url in (sources[:1] if fast_only else sources):
+        for source, url in selected:
+            if source == "awc" and time.monotonic() < self._awc_next_retry:
+                continue
             try:
                 body = _get(url, timeout=4).decode(errors="replace")
+                if source == "awc":
+                    if self._awc_failures:
+                        log.info("METAR AWC %s recovered", self.icao)
+                    self._awc_failures = 0
+                    self._awc_next_retry = 0.0
                 for line in body.splitlines():
                     if re.search(r"\b" + re.escape(self.icao) + r"\s+\d{6}Z\b", line):
                         lines.append((source, line.strip()))
             except Exception as e:
-                log.warning("METAR %s %s failed: %s", source, self.icao, e)
+                if source == "awc":
+                    self._awc_failures += 1
+                    wait = min(1800, 60 * (2 ** min(self._awc_failures - 1, 5)))
+                    self._awc_next_retry = time.monotonic() + wait
+                    log.warning("METAR AWC %s unavailable (%s), retry in %ds",
+                                self.icao, type(e).__name__, wait)
+                else:
+                    log.warning("METAR %s %s failed: %s", source, self.icao, e)
         if not lines:
             return []
         now = datetime.now(timezone.utc); out = []
