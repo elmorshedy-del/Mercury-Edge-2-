@@ -106,3 +106,101 @@ class MinuteTempFeed:
         if len(self._seen) > 1000:
             self._seen = {key}
         return [ev]
+
+
+class MinuteTempStream:
+    """Push the earliest vendor observation into a bounded queue.
+
+    Calls no trading code from WebSocket threads. REST source is a fallback and
+    covers any stations not included in Starter's 6-city WS subscription cap.
+    """
+    def __init__(self, api_key: str, station_offsets: dict[str, int], out_queue, stop):
+        self.api_key = api_key
+        self.station_offsets = station_offsets
+        self.out_queue = out_queue
+        self.stop = stop
+        self._seen: set[tuple[str, datetime, int]] = set()
+
+    def _ticket(self):
+        req = urllib.request.Request(
+            "https://api.minutetemp.com/api/v1/ws-ticket",
+            method="POST", data=b"",
+            headers={"X-API-Key": self.api_key, "User-Agent": "MercuryEdge2/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            payload = json.loads(response.read(10000))
+        return payload["data"]["ticket"]
+
+    def _slugs(self):
+        req = urllib.request.Request(
+            "https://api.minutetemp.com/api/v1/cities",
+            headers={"X-API-Key": self.api_key, "User-Agent": "MercuryEdge2/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            payload = json.loads(response.read(200000))
+        want = ["KLAX", "KNYC", "KDEN", "KPHL", "KMIA", "KMDW", "KAUS"]
+        found = {}
+        for city in payload.get("data", []):
+            slug = city.get("slug")
+            for station in city.get("stations", []):
+                sid = station.get("station_id")
+                if sid in self.station_offsets and slug:
+                    found[sid] = slug
+        # Starter allows <= 6 city subscriptions, and all are independent.
+        return list(dict.fromkeys(found[s] for s in want if s in found))[:6]
+
+    def _on_message(self, raw):
+        try:
+            msg = json.loads(raw)
+            if msg.get("type") != "observation":
+                return
+            station = msg.get("station_id")
+            if station not in self.station_offsets:
+                return
+            seen = datetime.now(timezone.utc)
+            ev = decode_latest(
+                {"data": {"station": {"station_id": station}, "observation": msg}},
+                station, self.station_offsets[station], seen)
+            if ev is None:
+                return
+            key = (ev.station, ev.obs_ts, ev.level_f)
+            if key in self._seen:
+                return
+            self._seen.add(key)
+            if len(self._seen) > 5000:
+                self._seen = {key}
+            ev = ProofEvent(
+                ev.station, ev.climate_date, ev.level_f, ev.channel,
+                ev.obs_ts, ev.seen_ts, ev.detail.replace("minutetemp-rest", "minutetemp-ws"))
+            self.out_queue.put_nowait(ev)
+        except Exception as exc:
+            if type(exc).__name__ != "Full":
+                log.warning("minuteTemp observation discarded: %s", type(exc).__name__)
+
+    def run(self):
+        try:
+            import websocket
+        except ImportError:
+            log.error("websocket-client package missing; minuteTemp stream disabled")
+            return
+        backoff = 3
+        while not self.stop.is_set():
+            try:
+                slugs = self._slugs()
+                if not slugs:
+                    raise RuntimeError("no supported city slugs")
+                ticket = self._ticket()
+                stream = websocket.WebSocketApp(
+                    "wss://api.minutetemp.com/ws/api/1m",
+                    subprotocols=["bearer", ticket],
+                    on_open=lambda ws: ws.send(json.dumps({
+                        "type": "subscribe", "cities": slugs})),
+                    on_message=lambda ws, message: self._on_message(message),
+                    on_error=lambda ws, error: log.warning(
+                        "minuteTemp websocket error: %s", type(error).__name__),
+                )
+                log.info("minuteTemp WS connecting: %d cities", len(slugs))
+                stream.run_forever(ping_interval=30, ping_timeout=10)
+                backoff = 3
+            except Exception as exc:
+                log.warning("minuteTemp WS reconnect: %s", type(exc).__name__)
+                backoff = min(60, backoff * 2)
+            self.stop.wait(backoff)
