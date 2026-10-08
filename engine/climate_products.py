@@ -57,7 +57,7 @@ def _product_issue_is_recent(text: str, now: datetime, wmo_prefix: str) -> bool:
     # NOAA files can retain a superseded product for years. Validate the WMO
     # header release DDHHMM, station's WFO, and freshness independently.
     head = re.search(
-        r"^("+re.escape(wmo_prefix)+r")\s+([A-Z]{4})\s+(\d{2})(\d{2})(\d{2})\s*$",
+        r"^("+re.escape(wmo_prefix)+r"\d{2})\s+([A-Z]{4})\s+(\d{2})(\d{2})(\d{2})\s*$",
         text, re.M)
     if not head:
         return False
