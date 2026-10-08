@@ -117,6 +117,7 @@
     "omo_poll_interval_s": 60,
     "idle_interval_s": 30,
     "fast_metar_poll_interval_s": 30,
-    "datis_poll_interval_s": 30
+    "datis_poll_interval_s": 30,
+    "minutetemp_poll_interval_s": 70
   }
 }
