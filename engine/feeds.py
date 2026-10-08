@@ -102,13 +102,27 @@ class MetarFeed:
         return (obs + timedelta(hours=self.lst)).date()
 
     def poll(self) -> list[ProofEvent]:
-        url = f"https://aviationweather.gov/api/data/metar?ids={self.icao}&format=raw&hours=2"
-        try:
-            txt = _get(url).decode(errors="replace")
-        except Exception as e:
-            log.warning("METAR poll %s failed: %s", self.icao, e); return []
+        # NOAA station-file lane won the measured KLAX METAR race against
+        # minuteTemp NOAAPORT and AviationWeather (single observed cycle).
+        # Keep AWC as a separate supplementary history/SPECI lane: TGFTP
+        # station files retain only the latest report.
+        sources = (
+            ("tgftp", f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{self.icao}.TXT"),
+            ("awc", f"https://aviationweather.gov/api/data/metar?ids={self.icao}&format=raw&hours=2"),
+        )
+        lines = []
+        for source, url in sources:
+            try:
+                body = _get(url, timeout=4).decode(errors="replace")
+                for line in body.splitlines():
+                    if re.search(r"\\b" + re.escape(self.icao) + r"\\s+\\d{6}Z\\b", line):
+                        lines.append((source, line.strip()))
+            except Exception as e:
+                log.warning("METAR %s %s failed: %s", source, self.icao, e)
+        if not lines:
+            return []
         now = datetime.now(timezone.utc); out = []
-        for raw in txt.splitlines():
+        for source, raw in lines:
             raw = raw.strip()
             if not raw or raw in self._seen:
                 continue
@@ -124,7 +138,7 @@ class MetarFeed:
             t = TGRP.search(raw)
             if t:
                 c10 = int(t.group(2)) / 10.0 * (-1 if t.group(1) == "1" else 1)
-                out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, raw[:60]))
+                out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, f"{source}: {raw[:60]}"))
             # Synoptic reports are stamped :51-:56 of the PRIOR hour (1751Z
             # carries the 18Z-cycle groups). Round forward to the nominal cycle
             # boundary, then require the entire preceding 6h window to stay
