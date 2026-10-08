@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "engine/**"
+      - "app/**"
       - "research/test_fast_weather_feeds.py"
       - "research/test_cross_midnight_sixhr.py"
       - "research/test_tgftp_climate.py"
@@ -12,6 +13,7 @@ on:
     branches:
       - "feature/tgftp-first-metar-race-20261008"
       - "fix/kden-feed-latency-cli-20261008"
+      - "fix/expose-mercury-feed-health-20261008"
     paths:
       - "engine/**"
       - "research/test_fast_weather_feeds.py"
@@ -30,7 +32,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile all feed and runtime modules
-        run: python -m compileall -q engine research/test_fast_weather_feeds.py
+        run: python -m compileall -q engine app research/test_fast_weather_feeds.py
       - name: Test fast D-ATIS and TGFTP proofs
         run: python research/test_fast_weather_feeds.py
       - name: Test six-hour cross-midnight safeguard
