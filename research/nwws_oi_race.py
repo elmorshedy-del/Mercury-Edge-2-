@@ -219,7 +219,7 @@ async def race():
                 self.send_presence()
                 try:
                     await self.plugin["xep_0045"].join_muc_wait(
-                        ROOM,nickname,password=password,timeout=35)
+                        ROOM,nickname,password=password,maxchars=0,timeout=35)
                     self.room_joined=True
                     log.info("NWWS_ROOM_JOINED %s",json.dumps({
                         "at":utcnow().isoformat(),"room":ROOM}))
@@ -230,7 +230,7 @@ async def race():
                     # password despite the docs listing one.
                     try:
                         await self.plugin["xep_0045"].join_muc_wait(
-                            ROOM,nickname,timeout=20)
+                            ROOM,nickname,maxchars=0,timeout=20)
                         self.room_joined=True
                         log.info("NWWS_ROOM_JOINED %s",json.dumps({
                             "at":utcnow().isoformat(),"room":ROOM,"fallback":True}))
