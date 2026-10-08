@@ -1,92 +1,122 @@
-"""Read the D-ATIS weather sentence at KLAX from ATIS Relay's public page.
+"""Fast airport ATIS weather evidence for the Mercury elimination bot.
 
-This is an independent, earlier METAR-temperature proof lane, *not* OMO or DSM.
-Require an exact T-group; rounded spoken temperatures are never trade evidence.
-ATIS Relay can regress to old letters, hence monotone observation-time filtering.
+ATIS Relay hosts multiple airports, but a feed contributes only if its
+ATIS information line contains an unambiguous METAR T-group. Do not use
+the rounded 2-digit Celsius text to assert an exact whole-F temperature.
+ATIS data is not one-minute ASOS/OMO and never substitutes for DSM.
 """
 from __future__ import annotations
 
 import html
 import logging
 import re
-from datetime import datetime, timedelta, timezone
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from decode import c10_to_f
 from feeds import ProofEvent, TGRP
 
 log = logging.getLogger("datis")
-ATIS_URL = "https://atisrelay.com/datis/KLAX"
-# Observed D-ATIS format: "LAX ATIS INFO X 1653Z. ... T02560211. INST..."
-HEAD = re.compile(r"\bLAX\s+ATIS\s+INFO\s+([A-Z])\s+(\d{4})Z\.", re.I)
-BODY_END = re.compile(r"(?:\.\s*INST\b|\.\.\.\s*ADVS\b|</p>|</meta>|</script>)", re.I)
+ENDPOINT = "https://atisrelay.com/datis/{icao}"
+
+# Examples from ATIS Relay (multiple airport formats):
+# LAX ATIS INFO X 1653Z. ...
+# PHL ARR INFO I 1454Z. ...
+# PHL DEP INFO V 1454Z. ...
+# MDW ATIS INFO O 1333Z SPECIAL. ...
+# DEN ARR INFO G 1453Z. ...
+HEAD = re.compile(
+    r"\b(?P<airport>[A-Z]{3})\s+(?:(?:ARR|DEP)\s+)?(?:ATIS\s+)?INFO\s+"
+    r"(?P<letter>[A-Z])\s+(?P<hhmm>\d{4})Z\b(?:\s+SPECIAL)?\.",
+    flags=re.IGNORECASE,
+)
+TEMP_PAIR = re.compile(r"\bM?\d{2}/M?\d{2}\b")
+CUTOFF = re.compile(r"(?:\.\.\.\s*ADVS|\bNOTAMS\b|<\s*/\s*p\s*>|<\s*/\s*h[123]\s*>)", re.I)
 
 
-def decode_klax_page(page: str, seen: datetime) -> tuple[datetime, int, str] | None:
-    """Return (observation_utc, proven_whole_F, ATIS_letter), or fail closed."""
-    m = HEAD.search(page)
-    if not m:
+def decode_page(page: str, icao: str, seen: datetime) -> tuple[datetime, int, str] | None:
+    """Return newest exact report as (obs UTC, proven F, ATIS letter); otherwise none.
+
+    Never cross from a station's ATIS sentence into the ordinary METAR widget.
+    This is important: that widget can update later than the actual ATIS.
+    """
+    if not re.fullmatch(r"K[A-Z]{3}", icao):
         return None
-    hhmm = m.group(2)
-    h, minute = int(hhmm[:2]), int(hhmm[2:])
-    if not (h < 24 and minute < 60):
+    airport = icao[1:]
+    candidates = []
+    for m in HEAD.finditer(page):
+        if m.group("airport").upper() != airport:
+            continue
+        hhmm = m.group("hhmm")
+        hh, mm = int(hhmm[:2]), int(hhmm[2:])
+        if not (hh < 24 and mm < 60):
+            continue
+        # Precision group is in the weather segment near the front of ATIS.
+        # Limit the segment to protect against unrelated website METAR text.
+        segment = page[m.end():m.end() + 400]
+        next_head = HEAD.search(segment)
+        if next_head:
+            segment = segment[:next_head.start()]
+        end = CUTOFF.search(segment)
+        if end:
+            segment = segment[:end.start()]
+        segment = re.sub(r"<[^>]*>", " ", html.unescape(segment))
+        if not TEMP_PAIR.search(segment):
+            continue
+        t = TGRP.search(segment)
+        if not t:
+            continue
+        c10 = int(t.group(2)) / 10 * (-1 if t.group(1) == "1" else 1)
+        proven_f = c10_to_f(c10)
+        if not (-60 <= proven_f <= 140):
+            continue
+        obs = seen.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if obs > seen + timedelta(minutes=5):
+            obs -= timedelta(days=1)
+        age = (seen - obs).total_seconds()
+        if not (-300 <= age <= 90 * 60):
+            continue
+        candidates.append((obs, proven_f, m.group("letter").upper()))
+    if not candidates:
         return None
-    raw = page[m.end():m.end() + 600]
-    cutoff = BODY_END.search(raw)
-    if cutoff:
-        raw = raw[:cutoff.start()]
-    body = re.sub(r"<[^>]*>", " ", html.unescape(raw))
-    if not re.search(r"\bM?\d{2}/M?\d{2}\b", body):
-        return None  # basic weather-wording sanity check
-    t = TGRP.search(body)
-    if not t:
-        return None
-    c10 = int(t.group(2)) / 10 * (-1 if t.group(1) == "1" else 1)
-    obs = seen.replace(hour=h, minute=minute, second=0, microsecond=0)
-    if obs > seen + timedelta(minutes=5):
-        obs -= timedelta(days=1)
-    age = (seen - obs).total_seconds()
-    if age < -300 or age > 95 * 60:
-        return None
-    proven = c10_to_f(c10)
-    if not (-60 <= proven <= 140):
-        return None
-    return obs, proven, m.group(1).upper()
+    return max(candidates, key=lambda candidate: candidate[0])
 
 
 class DATISFeed:
     def __init__(self, icao: str, lst_offset_h: int):
-        if icao != "KLAX":
-            raise ValueError("Only measured KLAX D-ATIS has been validated")
+        if not re.fullmatch(r"K[A-Z]{3}", icao):
+            raise ValueError("Invalid ICAO identifier")
         self.icao = icao
         self.lst = lst_offset_h
         self._newest_obs: datetime | None = None
-        self._seen: set[tuple] = set()
+        self._seen: set[tuple[datetime, int]] = set()
 
     def poll(self) -> list[ProofEvent]:
-        now = datetime.now(timezone.utc)
         req = urllib.request.Request(
-            ATIS_URL, headers={"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"})
+            ENDPOINT.format(icao=self.icao),
+            headers={"User-Agent": "Mozilla/5.0 (Mercury weather observations)",
+                     "Cache-Control": "no-cache"})
         try:
             with urllib.request.urlopen(req, timeout=4) as response:
-                page = response.read(250000).decode("utf-8", errors="replace")
+                page = response.read(200000).decode(errors="replace")
         except Exception as exc:
-            log.warning("D-ATIS KLAX unavailable: %s", exc)
+            log.warning("D-ATIS %s unavailable: %s", self.icao, exc)
             return []
-        parsed = decode_klax_page(page, datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        parsed = decode_page(page, self.icao, now)
         if parsed is None:
             return []
         obs, level_f, letter = parsed
         if self._newest_obs is not None and obs < self._newest_obs:
-            return []  # ATIS Relay sometimes returns a prior letter briefly.
+            return []  # Some ATIS pages temporarily regress to old letters.
         self._newest_obs = obs
         key = (obs, level_f)
         if key in self._seen:
             return []
         self._seen.add(key)
-        if len(self._seen) > 1000:
-            self._seen = {key}  # bound long-lived state
-        seen = datetime.now(timezone.utc)
+        if len(self._seen) > 1024:
+            self._seen = {key}
         return [ProofEvent(
             self.icao, (obs + timedelta(hours=self.lst)).date(), level_f,
-            "metar", obs, seen, f"datis-atisrelay letter={letter} obs={obs.isoformat()}")]
+            "metar", obs, now,
+            detail=f"atisrelay-datis letter={letter} obs={obs.isoformat()}")]
