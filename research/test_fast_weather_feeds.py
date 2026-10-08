@@ -171,9 +171,11 @@ class MinuteTempTests(unittest.TestCase):
         q = queue.Queue(maxsize=10)
         ws = MinuteTempStream("dummy", {"KLAX": -8}, q, threading.Event())
         packet = self.sample()
-        with patch("minutetemp.datetime") as dt:
-            dt.now.return_value = datetime(2026, 10, 8, 17, 27, 14,
-                                           tzinfo=timezone.utc)
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 8, 17, 27, 14, tzinfo=timezone.utc)
+        with patch("minutetemp.datetime", FixedDateTime):
             ws._on_message(json.dumps(packet))
             packet["persistence_status"] = "committed"
             ws._on_message(json.dumps(packet))
