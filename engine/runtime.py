@@ -223,6 +223,10 @@ def loop(stop: threading.Event):
                     city = next((c for c in CITIES if key.startswith(c.key + ":")), None)
                     if city and city.datis and city.datis._fail_count:
                         status = "upstream_error_backoff"
+                if key.endswith(":awc"):
+                    city = next((c for c in CITIES if key.startswith(c.key + ":")), None)
+                    if city and city.metar._awc_failures:
+                        status = "upstream_error_backoff"
                 STATE["source_health"][key] = {
                     "status": status,
                     "completed_at": completed_at.isoformat(),
