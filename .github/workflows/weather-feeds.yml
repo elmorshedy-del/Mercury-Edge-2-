@@ -1,0 +1,35 @@
+name: Mercury weather-feed regressions
+
+on:
+  pull_request:
+    paths:
+      - "engine/**"
+      - "research/test_fast_weather_feeds.py"
+      - "research/test_cross_midnight_sixhr.py"
+      - ".github/workflows/weather-feeds.yml"
+  push:
+    branches:
+      - "feature/tgftp-first-metar-race-20261008"
+    paths:
+      - "engine/**"
+      - "research/test_fast_weather_feeds.py"
+      - "research/test_cross_midnight_sixhr.py"
+      - ".github/workflows/weather-feeds.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  weather-feeds:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile all feed and runtime modules
+        run: python -m compileall -q engine research/test_fast_weather_feeds.py
+      - name: Test fast D-ATIS and TGFTP proofs
+        run: python research/test_fast_weather_feeds.py
+      - name: Test six-hour cross-midnight safeguard
+        run: python research/test_cross_midnight_sixhr.py
