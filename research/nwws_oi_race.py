@@ -52,13 +52,14 @@ def utcnow():
 def safe_report_time(day: int, hh: int, mm: int, received: datetime):
     if not (1 <= day <= 31 and 0 <= hh < 24 and 0 <= mm < 60):
         return None
-    month_start = received.replace(day=1, hour=0, minute=0,
-                                   second=0, microsecond=0)
     matches = []
-    for shift in (-32, 0, 32):
-        month = (month_start + timedelta(days=shift)).replace(day=1)
+    # Use month-index arithmetic: subtracting 32 days from Jan 1 jumps
+    # to NOVEMBER, not December, and loses year-boundary reports.
+    for month_offset in (-1, 0, 1):
+        absolute = received.year * 12 + received.month - 1 + month_offset
+        year, zero_month = divmod(absolute, 12)
         try:
-            obs = month.replace(day=day, hour=hh, minute=mm)
+            obs = datetime(year, zero_month + 1, day, hh, mm, tzinfo=timezone.utc)
         except ValueError:
             continue
         if -600 <= (received - obs).total_seconds() <= 48 * 3600:
