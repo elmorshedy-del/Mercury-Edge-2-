@@ -115,7 +115,7 @@ class MetarFeed:
             try:
                 body = _get(url, timeout=4).decode(errors="replace")
                 for line in body.splitlines():
-                    if re.search(r"\\b" + re.escape(self.icao) + r"\\s+\\d{6}Z\\b", line):
+                    if re.search(r"\b" + re.escape(self.icao) + r"\s+\d{6}Z\b", line):
                         lines.append((source, line.strip()))
             except Exception as e:
                 log.warning("METAR %s %s failed: %s", source, self.icao, e)
