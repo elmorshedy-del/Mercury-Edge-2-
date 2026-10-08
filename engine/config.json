@@ -24,7 +24,8 @@
       ],
       "metar_minute": 51,
       "omo": false,
-      "note": "PRIMARY LANE — no sub-hourly public feed; DSM race is open"
+      "note": "PRIMARY LANE — no sub-hourly public feed; DSM race is open",
+      "datis": false
     },
     "DEN": {
       "icao": "KDEN",
@@ -37,7 +38,8 @@
       "dsm_hourly_sweep": true,
       "metar_minute": 53,
       "omo": false,
-      "note": "PRIMARY LANE — verify current DSM cadence (broke Aug 6: hourly->2/day)"
+      "note": "PRIMARY LANE — verify current DSM cadence (broke Aug 6: hourly->2/day)",
+      "datis": true
     },
     "PHL": {
       "icao": "KPHL",
@@ -50,7 +52,8 @@
       ],
       "metar_minute": 54,
       "omo": true,
-      "note": "occupied by a private-sensor actor at touch-moments; race legs still valid"
+      "note": "occupied by a private-sensor actor at touch-moments; race legs still valid",
+      "datis": true
     },
     "MDW": {
       "icao": "KMDW",
@@ -62,7 +65,8 @@
         "22:15"
       ],
       "metar_minute": 53,
-      "omo": true
+      "omo": true,
+      "datis": true
     },
     "AUS": {
       "icao": "KAUS",
@@ -75,7 +79,8 @@
       ],
       "metar_minute": 53,
       "omo": true,
-      "note": "extreme-heat tails produced most covered-city harvest"
+      "note": "extreme-heat tails produced most covered-city harvest",
+      "datis": true
     },
     "MIA": {
       "icao": "KMIA",
@@ -87,7 +92,8 @@
         "21:15"
       ],
       "metar_minute": 53,
-      "omo": true
+      "omo": true,
+      "datis": true
     },
     "LAX": {
       "icao": "KLAX",
@@ -99,7 +105,8 @@
         "00:15"
       ],
       "metar_minute": 53,
-      "omo": true
+      "omo": true,
+      "datis": true
     }
   },
   "polling": {
@@ -109,6 +116,7 @@
     "metar_poll_interval_s": 5,
     "omo_poll_interval_s": 60,
     "idle_interval_s": 30,
-    "fast_metar_poll_interval_s": 60
+    "fast_metar_poll_interval_s": 30,
+    "datis_poll_interval_s": 30
   }
 }
