@@ -136,7 +136,12 @@ class MinuteTempStream:
             headers={"X-API-Key": self.api_key, "User-Agent": "MercuryEdge2/1.0"})
         with urllib.request.urlopen(req, timeout=8) as response:
             payload = json.loads(response.read(200000))
-        want = ["KLAX", "KNYC", "KDEN", "KPHL", "KMIA", "KMDW", "KAUS"]
+        # Starter limits ALL concurrent WS subscriptions to six. The existing
+        # independent KLAX race probe keeps one "la" subscription. Reserve
+        # five for Mercury, without disconnecting or editing any shadow.
+        # Prioritize KDEN (known AWC timeouts) and stations without reliable
+        # MADIS coverage. KLAX remains on D-ATIS/TGFTP/REST in Mercury.
+        want = ["KDEN", "KNYC", "KPHL", "KAUS", "KMIA", "KMDW"]
         found = {}
         for city in payload.get("data", []):
             slug = city.get("slug")
@@ -144,8 +149,10 @@ class MinuteTempStream:
                 sid = station.get("station_id")
                 if sid in self.station_offsets and slug:
                     found[sid] = slug
-        # Starter allows <= 6 city subscriptions, and all are independent.
-        return list(dict.fromkeys(found[s] for s in want if s in found))[:6]
+        # Account-wide cap, minus one already reserved for shadow KLAX.
+        selected = list(dict.fromkeys(found[s] for s in want if s in found))[:5]
+        log.info("minuteTemp WS allocation: %d active city subscriptions", len(selected))
+        return selected
 
     def _on_message(self, raw):
         try:
@@ -196,6 +203,8 @@ class MinuteTempStream:
                     on_message=lambda ws, message: self._on_message(message),
                     on_error=lambda ws, error: log.warning(
                         "minuteTemp websocket error: %s", type(error).__name__),
+                    on_close=lambda ws, code, reason: log.warning(
+                        "minuteTemp WS closed code=%s", code),
                 )
                 log.info("minuteTemp WS connecting: %d cities", len(slugs))
                 stream.run_forever(ping_interval=30, ping_timeout=10)
