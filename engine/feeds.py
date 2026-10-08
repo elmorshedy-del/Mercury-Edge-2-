@@ -101,7 +101,7 @@ class MetarFeed:
     def _climate_date(self, obs: datetime) -> Date:
         return (obs + timedelta(hours=self.lst)).date()
 
-    def poll(self, fast_only: bool = False) -> list[ProofEvent]:
+    def poll(self, fast_only: bool = False, awc_only: bool = False) -> list[ProofEvent]:
         # NOAA station-file lane won the measured KLAX METAR race against
         # minuteTemp NOAAPORT and AviationWeather (single observed cycle).
         # Keep AWC as a separate supplementary history/SPECI lane: TGFTP
@@ -110,8 +110,11 @@ class MetarFeed:
             ("tgftp", f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{self.icao}.TXT"),
             ("awc", f"https://aviationweather.gov/api/data/metar?ids={self.icao}&format=raw&hours=2"),
         )
+        if fast_only and awc_only:
+            raise ValueError('Choose TGFTP or AWC, not both')
+        selected = sources[:1] if fast_only else sources[1:] if awc_only else sources
         lines = []
-        for source, url in (sources[:1] if fast_only else sources):
+        for source, url in selected:
             try:
                 body = _get(url, timeout=4).decode(errors="replace")
                 for line in body.splitlines():
@@ -130,10 +133,25 @@ class MetarFeed:
             dm = re.search(r'\b(\d{2})(\d{2})(\d{2})Z\b', raw)
             if not dm:
                 continue
-            obs = now.replace(day=int(dm.group(1)), hour=int(dm.group(2)),
-                              minute=int(dm.group(3)), second=0, microsecond=0)
-            if obs > now + timedelta(hours=1):   # month boundary
-                obs -= timedelta(days=31)
+            day, hour, minute = [int(dm.group(i)) for i in (1, 2, 3)]
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                continue
+            # Resolve month/year rollover with actual calendar boundaries;
+            # subtracting a fixed 31 days breaks February and short months.
+            month_start = now.replace(day=1, hour=0, minute=0,
+                                      second=0, microsecond=0)
+            candidates = []
+            for shift in (-32, 0, 32):
+                month = (month_start + timedelta(days=shift)).replace(day=1)
+                try:
+                    obs_candidate = month.replace(day=day, hour=hour, minute=minute)
+                except ValueError:
+                    continue
+                if now - timedelta(hours=48) <= obs_candidate <= now + timedelta(minutes=10):
+                    candidates.append(obs_candidate)
+            if not candidates:
+                continue
+            obs = min(candidates, key=lambda x: abs((now - x).total_seconds()))
             cdate = self._climate_date(obs)
             t = TGRP.search(raw)
             if t:
