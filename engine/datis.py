@@ -10,6 +10,8 @@ from __future__ import annotations
 import html
 import logging
 import re
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -90,8 +92,13 @@ class DATISFeed:
         self.lst = lst_offset_h
         self._newest_obs: datetime | None = None
         self._seen: set[tuple[datetime, int]] = set()
+        self._failure_count = 0
+        self._retry_after = 0.0
+        self.last_error = None
 
     def poll(self) -> list[ProofEvent]:
+        if time.monotonic() < self._retry_after:
+            return []
         req = urllib.request.Request(
             ENDPOINT.format(icao=self.icao),
             headers={"User-Agent": "Mozilla/5.0 (Mercury weather observations)",
@@ -100,8 +107,21 @@ class DATISFeed:
             with urllib.request.urlopen(req, timeout=4) as response:
                 page = response.read(200000).decode(errors="replace")
         except Exception as exc:
-            log.warning("D-ATIS %s unavailable: %s", self.icao, exc)
+            self._failure_count += 1
+            http_status = getattr(exc, "code", None)
+            delay = (3600 if http_status in (401, 403, 404) else
+                     min(1800, 60 * (2 ** min(self._failure_count - 1, 5))))
+            self._retry_after = time.monotonic() + delay
+            self.last_error = f"HTTP {http_status}" if http_status else type(exc).__name__
+            log.warning("D-ATIS %s upstream=%s retry_in=%ds (TGFTP remains live)",
+                        self.icao, self.last_error, delay)
             return []
+        if self._failure_count:
+            log.info("D-ATIS %s recovered after %d failed requests",
+                     self.icao, self._failure_count)
+        self._failure_count = 0
+        self._retry_after = 0.0
+        self.last_error = None
         now = datetime.now(timezone.utc)
         parsed = decode_page(page, self.icao, now)
         if parsed is None:
