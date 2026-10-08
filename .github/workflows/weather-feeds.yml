@@ -7,11 +7,13 @@ on:
       - "research/test_fast_weather_feeds.py"
       - "research/test_cross_midnight_sixhr.py"
       - "research/test_tgftp_climate.py"
+      - "research/test_climate_hardening.py"
       - ".github/workflows/weather-feeds.yml"
   push:
     branches:
       - "feature/tgftp-first-metar-race-20261008"
       - "fix/kden-feed-latency-cli-20261008"
+      - "fix/mercury-noaa-date-and-awc-backoff-oct8"
     paths:
       - "engine/**"
       - "research/test_fast_weather_feeds.py"
@@ -37,3 +39,5 @@ jobs:
         run: python research/test_cross_midnight_sixhr.py
       - name: Test official CLI DSM and KDEN source isolation
         run: python research/test_tgftp_climate.py
+      - name: Test fresh WMO bulletins, corrected DSM and AWC backoff
+        run: python research/test_climate_hardening.py
