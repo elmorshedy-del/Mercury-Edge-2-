@@ -101,7 +101,7 @@ class MetarFeed:
     def _climate_date(self, obs: datetime) -> Date:
         return (obs + timedelta(hours=self.lst)).date()
 
-    def poll(self) -> list[ProofEvent]:
+    def poll(self, fast_only: bool = False) -> list[ProofEvent]:
         # NOAA station-file lane won the measured KLAX METAR race against
         # minuteTemp NOAAPORT and AviationWeather (single observed cycle).
         # Keep AWC as a separate supplementary history/SPECI lane: TGFTP
@@ -111,7 +111,7 @@ class MetarFeed:
             ("awc", f"https://aviationweather.gov/api/data/metar?ids={self.icao}&format=raw&hours=2"),
         )
         lines = []
-        for source, url in sources:
+        for source, url in (sources[:1] if fast_only else sources):
             try:
                 body = _get(url, timeout=4).decode(errors="replace")
                 for line in body.splitlines():
