@@ -90,7 +90,7 @@ def parse_cli(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent |
     if not (-50 <= level <= 135):
         return None
     return ProofEvent(icao, reported, level, "cli", None, now,
-                      f"tgftp CL I{city} official TODAY maximum={level}F".replace("CL I", "CLI"))
+                      f"tgftp CLI{city} official TODAY maximum={level}F")
 
 
 def parse_dsm(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent | None:
