@@ -1,14 +1,14 @@
 """runtime.py — the scheduler as an importable, thread-runnable service.
 Same logic as the standalone run.py, plus journaling and a shared STATE for the API."""
 from __future__ import annotations
-import json, time, logging, os, threading
+import json, time, logging, os, threading, queue
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, date as Date
 
 import journal
 from feeds import DSMFeed, MetarFeed, OMOFeed
 from datis import DATISFeed
-from minutetemp import MinuteTempFeed
+from minutetemp import MinuteTempFeed, MinuteTempStream
 from market import board, quote
 from strategy import KillEngine, CityState
 import paper
@@ -154,6 +154,11 @@ def loop(stop: threading.Event):
     omo = OMOFeed(omo_stations)
     mt_key = os.environ.get("MT_KEY", "")
     mt_feeds = [(c, MinuteTempFeed(c.icao, c.lst, mt_key)) for c in CITIES] if mt_key else []
+    mt_queue = queue.Queue(maxsize=500)
+    if mt_key:
+        offsets = {c.icao: c.lst for c in CITIES}
+        stream = MinuteTempStream(mt_key, offsets, mt_queue, stop)
+        threading.Thread(target=stream.run, daemon=True, name="minutetemp-1m-ws").start()
     STATE["sources"] = {"madis_hf": "enabled", "datis": "enabled",
                         "tgftp": "enabled",
                         "minutetemp": "enabled" if mt_key else "missing_MT_KEY"}
@@ -182,6 +187,18 @@ def loop(stop: threading.Event):
             try:
                 now = datetime.now(timezone.utc)
                 monotonic_now = time.monotonic()
+
+                # Process vendor push observations as soon as possible.
+                # The queue is filled only by the minuteTemp network thread.
+                by_icao = {c.icao: c for c in CITIES}
+                for _ in range(500):
+                    try:
+                        ev = mt_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    c = by_icao.get(ev.station)
+                    if c:
+                        _handle(c, [ev])
 
                 # Early official METAR-temperature evidence from ATIS Relay.
                 # ATIS is not OMO, DSM, or a six-hour maximum report.
