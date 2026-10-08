@@ -69,7 +69,8 @@ class BulletinHardeningTests(unittest.TestCase):
                 raise TimeoutError("Test AWC read timeout")
             return report.encode()
         with patch("feeds._get", side_effect=fetch), patch("feeds.datetime", FixedDate):
-            self.assertEqual(feed.poll(awc_only=True), [])
+            with self.assertRaises(RuntimeError):
+                feed.poll(awc_only=True)
             self.assertEqual(feed.poll(awc_only=True), [])
             proof = feed.poll(fast_only=True)
         self.assertEqual(len([u for u in calls if "aviationweather.gov" in u]), 1)
