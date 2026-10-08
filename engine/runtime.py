@@ -1,11 +1,14 @@
 """runtime.py — the scheduler as an importable, thread-runnable service.
 Same logic as the standalone run.py, plus journaling and a shared STATE for the API."""
 from __future__ import annotations
-import json, time, logging, os, threading
+import json, time, logging, os, threading, queue
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, date as Date
 
 import journal
 from feeds import DSMFeed, MetarFeed, OMOFeed
+from datis import DATISFeed
+from minutetemp import MinuteTempFeed, MinuteTempStream
 from market import board, quote
 from strategy import KillEngine, CityState
 import paper
@@ -17,7 +20,7 @@ CFG = json.load(open(os.path.join(HERE, "config.json")))
 DATA_DIR = journal.DATA_DIR
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 
-STATE = {"started": None, "mode": "PAPER", "last_poll": {}, "cities": {}}
+STATE = {"started": None, "mode": "PAPER", "last_poll": {}, "latest_proof": {}, "sources": {}, "cities": {}}
 _state_lock = threading.Lock()
 
 def climate_today(lst_off: int) -> Date:
@@ -29,6 +32,7 @@ class City:
         self.icao, self.series, self.lst = c["icao"], c["series"], c["lst_offset_h"]
         self.dsm = DSMFeed(c["dsm_pil"], self.icao, self.lst)
         self.metar = MetarFeed(self.icao, self.lst)
+        self.datis = DATISFeed(self.icao, self.lst) if c.get("datis") else None
         self.state = CityState(self.icao, self.series)
         self._board_date, self._board = None, []
     def buckets(self):
@@ -98,8 +102,17 @@ def _handle(city: City, events):
     for ev in events:
         if ev.climate_date != climate_today(city.lst):
             continue
+        STATE["latest_proof"][f"{city.key}:{ev.channel}"] = {
+            "station": ev.station, "source": ev.detail[:120],
+            "level_f": ev.level_f,
+            "obs_ts": ev.obs_ts.isoformat() if ev.obs_ts else None,
+            "seen_ts": ev.seen_ts.isoformat(),
+            "latency_s": round((ev.seen_ts - ev.obs_ts).total_seconds(), 1) if ev.obs_ts else None,
+        }
         journal.emit("proof", city=city.key, station=ev.station, channel=ev.channel,
-                     level_f=ev.level_f, climate_date=str(ev.climate_date), detail=ev.detail[:120])
+                     level_f=ev.level_f, climate_date=str(ev.climate_date), detail=ev.detail[:120],
+                     obs_ts=ev.obs_ts.isoformat() if ev.obs_ts else None,
+                     seen_ts=ev.seen_ts.isoformat())
         intents = ENGINE.on_proof(city.state, ev, city.buckets(), quote)
         for it in intents:
             journal.emit("intent", city=city.key, ticker=it.ticker, action=it.action,
@@ -113,7 +126,9 @@ def _handle(city: City, events):
 def snapshot_state():
     with _state_lock:
         out = {"started": STATE["started"], "mode": STATE["mode"],
-               "last_poll": dict(STATE["last_poll"]), "cities": {}}
+               "last_poll": dict(STATE["last_poll"]),
+               "latest_proof": dict(STATE["latest_proof"]),
+               "sources": dict(STATE["sources"]), "cities": {}}
         for c in CITIES:
             d = climate_today(c.lst)
             out["cities"][c.key] = {
@@ -137,6 +152,16 @@ def loop(stop: threading.Event):
     journal.emit("system", msg=f"runtime started mode={STATE['mode']}")
     omo_stations = {c["icao"]: c["lst_offset_h"] for c in CFG["cities"].values() if c.get("omo")}
     omo = OMOFeed(omo_stations)
+    mt_key = os.environ.get("MT_KEY", "")
+    mt_feeds = [(c, MinuteTempFeed(c.icao, c.lst, mt_key)) for c in CITIES] if mt_key else []
+    mt_queue = queue.Queue(maxsize=500)
+    if mt_key:
+        offsets = {c.icao: c.lst for c in CITIES}
+        stream = MinuteTempStream(mt_key, offsets, mt_queue, stop)
+        threading.Thread(target=stream.run, daemon=True, name="minutetemp-1m-ws").start()
+    STATE["sources"] = {"madis_hf": "enabled", "datis": "enabled",
+                        "tgftp": "enabled",
+                        "minutetemp": "enabled" if mt_key else "missing_MT_KEY"}
     pol = CFG["polling"]
     # warm start
     for c in CITIES:
@@ -147,30 +172,102 @@ def loop(stop: threading.Event):
             log.warning("warm start %s: %s", c.key, e)
     _persist()
     last_omo = 0.0
-    while not stop.is_set():
-        try:
-            now = datetime.now(timezone.utc)
-            busy = False
-            for c in CITIES:
-                if c.in_dsm_window(now, pol["dsm_window_halfwidth_s"]):
-                    _handle(c, c.dsm.poll()); busy = True
-                    STATE["last_poll"][f"{c.key}:dsm"] = now.isoformat()
-                    stop.wait(pol["dsm_poll_interval_s"])
-                if c.in_metar_window(now, pol["metar_window_s"]):
-                    _handle(c, c.metar.poll()); busy = True
-                    STATE["last_poll"][f"{c.key}:metar"] = now.isoformat()
-                    stop.wait(pol["metar_poll_interval_s"])
-            if omo_stations and time.time() - last_omo >= pol["omo_poll_interval_s"]:
-                evs = omo.poll(); last_omo = time.time()
-                STATE["last_poll"]["omo"] = now.isoformat()
-                for ev in evs:
-                    city = next((c for c in CITIES if c.icao == ev.station), None)
-                    if city:
-                        _handle(city, [ev])
-            _persist()
-            if not busy:
-                stop.wait(pol["idle_interval_s"])
-        except Exception as e:
-            log.error("loop error: %s", e)
-            journal.emit("system", level="ERROR", msg=f"loop error: {e}")
-            stop.wait(10)
+    last_fast_metar = 0.0
+    last_datis = 0.0
+    last_minutetemp = 0.0
+    last_dsm_city = {}
+    last_awc_city = {}
+    datis_cities = [c for c in CITIES if c.datis is not None]
+
+    # Fetch all station pages concurrently so a slow Denver response cannot
+    # delay an earlier Los Angeles observation. Only this thread applies
+    # evidence to the elimination engine; worker threads do network I/O.
+    with ThreadPoolExecutor(max_workers=10, thread_name_prefix="weather-feed") as pool:
+        while not stop.is_set():
+            try:
+                now = datetime.now(timezone.utc)
+                monotonic_now = time.monotonic()
+
+                # Process vendor push observations as soon as possible.
+                # The queue is filled only by the minuteTemp network thread.
+                by_icao = {c.icao: c for c in CITIES}
+                for _ in range(500):
+                    try:
+                        ev = mt_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    c = by_icao.get(ev.station)
+                    if c:
+                        _handle(c, [ev])
+
+                # Early official METAR-temperature evidence from ATIS Relay.
+                # ATIS is not OMO, DSM, or a six-hour maximum report.
+                if datis_cities and monotonic_now - last_datis >= pol.get("datis_poll_interval_s", 30):
+                    tasks = [(c, pool.submit(c.datis.poll)) for c in datis_cities]
+                    for c, task in tasks:
+                        try:
+                            _handle(c, task.result(timeout=5))
+                        except Exception as exc:
+                            log.warning("D-ATIS %s failed: %s", c.icao, exc)
+                        STATE["last_poll"][f"{c.key}:datis"] = now.isoformat()
+                    last_datis = time.monotonic()
+
+                # Continuous station-file METAR/SPECI lane, including the
+                # 6-hour max group at nominal 00/06/12/18Z synoptic cycles.
+                if monotonic_now - last_fast_metar >= pol.get("fast_metar_poll_interval_s", 30):
+                    tasks = [(c, pool.submit(c.metar.poll, True)) for c in CITIES]
+                    for c, task in tasks:
+                        try:
+                            _handle(c, task.result(timeout=5))
+                        except Exception as exc:
+                            log.warning("TGFTP %s failed: %s", c.icao, exc)
+                        STATE["last_poll"][f"{c.key}:tgftp"] = now.isoformat()
+                    last_fast_metar = time.monotonic()
+
+                # Preserve existing DSM and AWC METAR history channels.
+                # Per-city cadence avoids starving later stations in the list.
+                for c in CITIES:
+                    if (c.in_dsm_window(now, pol["dsm_window_halfwidth_s"])
+                        and monotonic_now - last_dsm_city.get(c.key, 0) >= max(
+                            10, pol["dsm_poll_interval_s"])):
+                        _handle(c, c.dsm.poll())
+                        last_dsm_city[c.key] = time.monotonic()
+                        STATE["last_poll"][f"{c.key}:dsm"] = now.isoformat()
+                    if (c.in_metar_window(now, pol["metar_window_s"])
+                        and monotonic_now - last_awc_city.get(c.key, 0) >= max(
+                            15, pol["metar_poll_interval_s"])):
+                        _handle(c, c.metar.poll())
+                        last_awc_city[c.key] = time.monotonic()
+                        STATE["last_poll"][f"{c.key}:metar"] = now.isoformat()
+
+                # Optional licensed one-minute provider: separate from MADIS,
+                # and used only when MT_KEY is configured on Mercury's service.
+                # Starter-tier limit is 15 requests/minute across all API keys.
+                if (mt_feeds and time.monotonic() - last_minutetemp >=
+                    pol.get("minutetemp_poll_interval_s", 70)):
+                    tasks = [(c, pool.submit(mt.poll)) for c, mt in mt_feeds]
+                    for c, task in tasks:
+                        try:
+                            _handle(c, task.result(timeout=6))
+                        except Exception as exc:
+                            log.warning("minuteTemp %s failed: %s", c.icao, exc)
+                        STATE["last_poll"][f"{c.key}:minutetemp"] = now.isoformat()
+                    last_minutetemp = time.monotonic()
+
+                # Existing MADIS one-minute observation lower-bound channel.
+                # Optional minuteTemp connection is separate, if configured.
+                if omo_stations and time.monotonic() - last_omo >= pol["omo_poll_interval_s"]:
+                    evs = omo.poll()
+                    last_omo = time.monotonic()
+                    STATE["last_poll"]["omo"] = now.isoformat()
+                    by_icao = {c.icao: c for c in CITIES}
+                    for ev in evs:
+                        c = by_icao.get(ev.station)
+                        if c:
+                            _handle(c, [ev])
+                _persist()
+                stop.wait(min(5, pol["idle_interval_s"]))
+            except Exception as exc:
+                log.error("loop error: %s", exc)
+                journal.emit("system", level="ERROR", msg=f"loop error: {exc}")
+                stop.wait(10)

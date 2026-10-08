@@ -5,3 +5,4 @@ numpy>=1.26
 # optional: live trading + push feed
 cryptography>=42.0
 slixmpp>=1.8
+websocket-client>=1.8
