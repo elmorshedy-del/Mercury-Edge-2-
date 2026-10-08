@@ -167,6 +167,26 @@ class MinuteTempTests(unittest.TestCase):
             {"data": {"station": {"station_id": "KLAX"}, "observation": packet}},
             "KLAX", -8, seen))
 
+    def test_websocket_reserves_one_slot_for_existing_shadow(self):
+        cities = [
+            {"slug": slug, "stations": [{"station_id": station}]}
+            for station, slug in (
+                ("KLAX", "la"), ("KNYC", "nyc"), ("KDEN", "den"),
+                ("KPHL", "phl"), ("KAUS", "aus"), ("KMIA", "mia"),
+                ("KMDW", "mdw"))
+        ]
+        stream = MinuteTempStream(
+            "placeholder-key", {entry["stations"][0]["station_id"]: -5
+                                for entry in cities},
+            queue.Queue(), threading.Event())
+        with patch("minutetemp.urllib.request.urlopen",
+                   return_value=FakeResponse(json.dumps({"data": cities}))):
+            chosen = stream._slugs()
+        self.assertEqual(len(chosen), 5)
+        self.assertIn("den", chosen)
+        self.assertNotIn("la", chosen)
+        self.assertEqual(len(set(chosen)), len(chosen))
+
     def test_websocket_event_deduplicates_preliminary_committed(self):
         q = queue.Queue(maxsize=10)
         ws = MinuteTempStream("dummy", {"KLAX": -8}, q, threading.Event())
