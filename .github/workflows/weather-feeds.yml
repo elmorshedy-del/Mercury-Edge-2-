@@ -6,10 +6,12 @@ on:
       - "engine/**"
       - "research/test_fast_weather_feeds.py"
       - "research/test_cross_midnight_sixhr.py"
+      - "research/test_tgftp_climate.py"
       - ".github/workflows/weather-feeds.yml"
   push:
     branches:
       - "feature/tgftp-first-metar-race-20261008"
+      - "fix/kden-feed-latency-cli-20261008"
     paths:
       - "engine/**"
       - "research/test_fast_weather_feeds.py"
@@ -33,3 +35,5 @@ jobs:
         run: python research/test_fast_weather_feeds.py
       - name: Test six-hour cross-midnight safeguard
         run: python research/test_cross_midnight_sixhr.py
+      - name: Test official CLI DSM and KDEN source isolation
+        run: python research/test_tgftp_climate.py

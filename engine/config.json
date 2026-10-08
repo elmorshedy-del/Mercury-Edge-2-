@@ -9,7 +9,8 @@
       "dsm",
       "metar",
       "sixhr",
-      "omo_floor"
+      "omo_floor",
+      "cli"
     ]
   },
   "cities": {
@@ -118,6 +119,9 @@
     "idle_interval_s": 30,
     "fast_metar_poll_interval_s": 30,
     "datis_poll_interval_s": 30,
-    "minutetemp_poll_interval_s": 70
+    "minutetemp_poll_interval_s": 90,
+    "tgftp_climate_interval_s": 30,
+    "tgftp_metar_interval_s": 30,
+    "awc_fallback_interval_s": 90
   }
 }

@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -90,18 +91,32 @@ class DATISFeed:
         self.lst = lst_offset_h
         self._newest_obs: datetime | None = None
         self._seen: set[tuple[datetime, int]] = set()
+        self._fail_count = 0
+        self._retry_after = 0.0
 
     def poll(self) -> list[ProofEvent]:
+        if time.monotonic() < self._retry_after:
+            return []
         req = urllib.request.Request(
             ENDPOINT.format(icao=self.icao),
             headers={"User-Agent": "Mozilla/5.0 (Mercury weather observations)",
                      "Cache-Control": "no-cache"})
         try:
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 page = response.read(200000).decode(errors="replace")
         except Exception as exc:
-            log.warning("D-ATIS %s unavailable: %s", self.icao, exc)
+            self._fail_count += 1
+            # The ATIS Relay service has been returning HTTP 500s for many
+            # airports. Cap repeated retries/log noise, while NOAA's TGFTP
+            # official METAR remains independently available.
+            backoff_s = min(900, 30 * (2 ** min(self._fail_count - 1, 5)))
+            self._retry_after = time.monotonic() + backoff_s
+            if self._fail_count in (1, 2, 3, 6, 12) or self._fail_count % 48 == 0:
+                log.warning("D-ATIS %s temporarily unavailable: %s (retry in %ds)",
+                            self.icao, type(exc).__name__, backoff_s)
             return []
+        self._fail_count = 0
+        self._retry_after = 0.0
         now = datetime.now(timezone.utc)
         parsed = decode_page(page, self.icao, now)
         if parsed is None:
