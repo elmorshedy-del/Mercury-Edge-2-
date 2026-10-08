@@ -147,6 +147,7 @@ def loop(stop: threading.Event):
             log.warning("warm start %s: %s", c.key, e)
     _persist()
     last_omo = 0.0
+    last_fast_metar = 0.0
     while not stop.is_set():
         try:
             now = datetime.now(timezone.utc)
@@ -160,7 +161,7 @@ def loop(stop: threading.Event):
                     _handle(c, c.metar.poll()); busy = True
                     STATE["last_poll"][f"{c.key}:metar"] = now.isoformat()
                     stop.wait(pol["metar_poll_interval_s"])
-            if omo_stations and time.time() - last_omo >= pol["omo_poll_interval_s"]:
+            # Fast station-file polling throughout the day catches SPECI and\n            # hourly reports even outside the old :51-:56 METAR window.\n            # This lane never polls AWC; scheduled METAR polls still provide\n            # multi-report history and synoptic six-hour groups.\n            if time.monotonic() - last_fast_metar >= pol.get("fast_metar_poll_interval_s", 30):\n                for c in CITIES:\n                    _handle(c, c.metar.poll(fast_only=True))\n                    STATE["last_poll"][f"{c.key}:tgftp"] = now.isoformat()\n                last_fast_metar = time.monotonic()\n            if omo_stations and time.time() - last_omo >= pol["omo_poll_interval_s"]:
                 evs = omo.poll(); last_omo = time.time()
                 STATE["last_poll"]["omo"] = now.isoformat()
                 for ev in evs:
