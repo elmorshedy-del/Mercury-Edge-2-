@@ -256,8 +256,17 @@ def loop(stop: threading.Event):
                     city = by_icao.get(ev.station)
                     if city:
                         _handle(city, [ev])
+                        received_ts = datetime.now(timezone.utc)
                         STATE["last_poll"][f"{city.key}:minutetemp-ws"] = (
-                            datetime.now(timezone.utc).isoformat())
+                            received_ts.isoformat())
+                        STATE["source_health"][f"{city.key}:minutetemp-ws"] = {
+                            "status": "ok",
+                            "station": ev.station,
+                            "completed_at": received_ts.isoformat(),
+                            "obs_age_s": round((received_ts - ev.obs_ts).total_seconds(), 1)
+                                if ev.obs_ts else None,
+                            "events": 1,
+                        }
                 receive_completed()
 
                 now = datetime.now(timezone.utc)
