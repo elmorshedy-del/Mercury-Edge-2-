@@ -30,7 +30,7 @@ class ProofEvent:
     detail: str = ""
 
 # --------------------------------------------------------------- DSM
-DSBODY = re.compile(r'^(K\w{3})\s+DS\s+(?:COR\s+)?(?:(\d{4})\s+)?(\d{2})/(\d{2})\s+(.*)
+DSBODY = re.compile(r'^(K\w{3})\s+DS\s+(?:COR\s+)?(?:(\d{4})\s+)?(\d{2})/(\d{2})\s+(.*)$')
 MAXTOK = re.compile(r'^(\d{2,3})(\d{4})$')
 
 class DSMFeed:
