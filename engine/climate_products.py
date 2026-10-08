@@ -37,6 +37,34 @@ TODAY_MAX = re.compile(
     r"^\s*TODAY\s*\n\s*MAXIMUM\s+(\d{1,3})\b", re.I | re.M)
 
 
+def _fresh_bulletin_header(line: str, now: datetime) -> bool:
+    """Reject cached/stale NOAA WMO products even when day/month coincides.
+
+    WMO DDHHMM has no month/year. Require a recent release from the closest
+    candidate month; this handles real month and year rollovers without
+    assuming every NOAA file updates daily.
+    """
+    m = re.fullmatch(r"(?:CDUS|CXUS)\d{2}\s+[A-Z]{4}\s+"
+                     r"(\d{2})(\d{2})(\d{2})", line.strip(), re.I)
+    if m is None:
+        return False
+    day, hour, minute = map(int, m.groups())
+    if hour >= 24 or minute >= 60:
+        return False
+    for dmonth in (-1, 0, 1):
+        ym = now.year * 12 + now.month - 1 + dmonth
+        year, month0 = divmod(ym, 12)
+        try:
+            issued = datetime(year, month0 + 1, day, hour, minute,
+                              tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        age = (now - issued).total_seconds()
+        if -600 <= age <= 36 * 3600:
+            return True
+    return False
+
+
 def urls(icao: str) -> dict[str, str]:
     office, number, city = STATIONS[icao]
     office = office.lower()
@@ -58,6 +86,8 @@ def parse_cli(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent |
         return None
     if not re.fullmatch(
         rf"CDUS{number}\s+{wfo}\s+\d{{6}}", top[0].strip(), flags=re.I):
+        return None
+    if not _fresh_bulletin_header(top[0], now):
         return None
     if top[1].strip().upper() != "CLI" + city:
         return None
@@ -102,6 +132,8 @@ def parse_dsm(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent |
         return None
     if not re.fullmatch(
         rf"CXUS{number}\s+{wfo}\s+\d{{6}}", rows[0].strip(), flags=re.I):
+        return None
+    if not _fresh_bulletin_header(rows[0], now):
         return None
     if rows[1].strip().upper() != "DSM" + city:
         return None
