@@ -48,7 +48,7 @@ class KillEngine:
         self.max_spread = cfg.get("max_spread_cents", 5)
         self.max_size = cfg.get("max_size_contracts", 300)
         self.fat_finger_f = cfg.get("fat_finger_guard_f", 12)
-        self.channels = set(cfg.get("channels", ["dsm", "metar", "sixhr", "omo_floor"]))
+        self.channels = set(cfg.get("channels", ["dsm", "metar", "sixhr", "omo_floor", "cli"]))
 
     def on_proof(self, st: CityState, ev: ProofEvent,
                  buckets: list[Bucket],
@@ -72,7 +72,7 @@ class KillEngine:
             # Physical-plausibility guard: a DSM/OMO claim can never exceed the
             # day's METAR-visible max by more than the invisible-gap bound.
             ref = st.metar_max.get(ev.climate_date)
-            if (ev.channel in ("dsm", "omo_floor") and ref is not None
+            if (ev.channel in ("dsm", "omo_floor", "cli") and ref is not None
                     and ev.level_f > ref + self.fat_finger_f):
                 log.error("GUARD: %s %s claims %sF via %s but METAR-visible max is %sF "
                           "(+%d limit) — held for confirmation",
