@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone, date as Date
 import journal
 from feeds import DSMFeed, MetarFeed, OMOFeed
 from datis import DATISFeed
+from minutetemp import MinuteTempFeed
 from market import board, quote
 from strategy import KillEngine, CityState
 import paper
@@ -19,7 +20,7 @@ CFG = json.load(open(os.path.join(HERE, "config.json")))
 DATA_DIR = journal.DATA_DIR
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 
-STATE = {"started": None, "mode": "PAPER", "last_poll": {}, "latest_proof": {}, "cities": {}}
+STATE = {"started": None, "mode": "PAPER", "last_poll": {}, "latest_proof": {}, "sources": {}, "cities": {}}
 _state_lock = threading.Lock()
 
 def climate_today(lst_off: int) -> Date:
@@ -126,7 +127,8 @@ def snapshot_state():
     with _state_lock:
         out = {"started": STATE["started"], "mode": STATE["mode"],
                "last_poll": dict(STATE["last_poll"]),
-               "latest_proof": dict(STATE["latest_proof"]), "cities": {}}
+               "latest_proof": dict(STATE["latest_proof"]),
+               "sources": dict(STATE["sources"]), "cities": {}}
         for c in CITIES:
             d = climate_today(c.lst)
             out["cities"][c.key] = {
@@ -150,6 +152,11 @@ def loop(stop: threading.Event):
     journal.emit("system", msg=f"runtime started mode={STATE['mode']}")
     omo_stations = {c["icao"]: c["lst_offset_h"] for c in CFG["cities"].values() if c.get("omo")}
     omo = OMOFeed(omo_stations)
+    mt_key = os.environ.get("MT_KEY", "")
+    mt_feeds = [(c, MinuteTempFeed(c.icao, c.lst, mt_key)) for c in CITIES] if mt_key else []
+    STATE["sources"] = {"madis_hf": "enabled", "datis": "enabled",
+                        "tgftp": "enabled",
+                        "minutetemp": "enabled" if mt_key else "missing_MT_KEY"}
     pol = CFG["polling"]
     # warm start
     for c in CITIES:
@@ -162,6 +169,7 @@ def loop(stop: threading.Event):
     last_omo = 0.0
     last_fast_metar = 0.0
     last_datis = 0.0
+    last_minutetemp = 0.0
     last_dsm_city = {}
     last_awc_city = {}
     datis_cities = [c for c in CITIES if c.datis is not None]
@@ -214,6 +222,20 @@ def loop(stop: threading.Event):
                         _handle(c, c.metar.poll())
                         last_awc_city[c.key] = time.monotonic()
                         STATE["last_poll"][f"{c.key}:metar"] = now.isoformat()
+
+                # Optional licensed one-minute provider: separate from MADIS,
+                # and used only when MT_KEY is configured on Mercury's service.
+                # Starter-tier limit is 15 requests/minute across all API keys.
+                if (mt_feeds and time.monotonic() - last_minutetemp >=
+                    pol.get("minutetemp_poll_interval_s", 70)):
+                    tasks = [(c, pool.submit(mt.poll)) for c, mt in mt_feeds]
+                    for c, task in tasks:
+                        try:
+                            _handle(c, task.result(timeout=6))
+                        except Exception as exc:
+                            log.warning("minuteTemp %s failed: %s", c.icao, exc)
+                        STATE["last_poll"][f"{c.key}:minutetemp"] = now.isoformat()
+                    last_minutetemp = time.monotonic()
 
                 # Existing MADIS one-minute observation lower-bound channel.
                 # Optional minuteTemp connection is separate, if configured.
