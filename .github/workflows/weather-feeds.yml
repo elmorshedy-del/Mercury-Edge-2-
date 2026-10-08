@@ -6,14 +6,17 @@ on:
       - "engine/**"
       - "research/test_fast_weather_feeds.py"
       - "research/test_cross_midnight_sixhr.py"
+      - "research/test_climate_products.py"
       - ".github/workflows/weather-feeds.yml"
   push:
     branches:
       - "feature/tgftp-first-metar-race-20261008"
+      - "fix/weather-proof-and-fallbacks-oct8"
     paths:
       - "engine/**"
       - "research/test_fast_weather_feeds.py"
       - "research/test_cross_midnight_sixhr.py"
+      - "research/test_climate_products.py"
       - ".github/workflows/weather-feeds.yml"
 
 permissions:
@@ -33,3 +36,5 @@ jobs:
         run: python research/test_fast_weather_feeds.py
       - name: Test six-hour cross-midnight safeguard
         run: python research/test_cross_midnight_sixhr.py
+      - name: Test same-day CLI, stale DSM guards and AWC fallback
+        run: python research/test_climate_products.py
