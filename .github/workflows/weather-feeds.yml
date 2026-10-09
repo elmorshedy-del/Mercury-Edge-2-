@@ -10,6 +10,7 @@ on:
       - "research/test_tgftp_climate.py"
       - "research/test_climate_hardening.py"
       - "research/test_source_agnostic_bridge.py"
+      - "research/test_floor_provenance.py"
       - ".github/workflows/weather-feeds.yml"
   push:
     branches:
@@ -46,3 +47,5 @@ jobs:
         run: python research/test_climate_hardening.py
       - name: Test signed NWWS ingress and source-agnostic temperature proofs
         run: python research/test_source_agnostic_bridge.py
+      - name: Test floor-setting source attribution and preservation
+        run: python research/test_floor_provenance.py
