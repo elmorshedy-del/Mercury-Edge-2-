@@ -9,10 +9,11 @@ from typing import Optional
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "engine"))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 import journal, runtime
+from proof_bridge import verify_and_decode, InvalidProof
 from market import board, quote, orderbook_yes_bids
 from research.history_query import query_jsonl
 
@@ -123,6 +124,39 @@ def _boards_with_quotes():
     return out
 
 # ---------------- API ----------------
+@app.post("/api/internal/nwws-proof")
+async def internal_nwws_proof(request: Request):
+    """Secure collector-to-Mercury handoff, no execution on request thread.
+
+    Enabled only with the same shared secret on both Railway services.
+    Keep audit stream visible, but never log signature, token or credentials.
+    """
+    secret=os.environ.get("NWWS_BRIDGE_SECRET","")
+    if (os.environ.get("NWWS_BRIDGE_ENABLED")!="yes" or len(secret)<32):
+        return JSONResponse(status_code=503,content={"status":"bridge_disabled"})
+    body=await request.body()
+    station_offsets={cfg["icao"]:cfg["lst_offset_h"]
+                     for cfg in CFG["cities"].values()}
+    try:
+        proof=verify_and_decode(
+            body,dict(request.headers),secret,station_offsets)
+    except InvalidProof as exc:
+        # Do not reveal the validity of signing secrets to an attacker.
+        journal.emit("system",level="WARN",msg=f"nwws bridge rejected: {str(exc)[:70]}")
+        return JSONResponse(status_code=422,content={"status":"proof_rejected"})
+    # Guard unexpected future LIVE operation. NWWS remains eligible for
+    # PAPER evaluation; real order execution is separately gated.
+    if runtime.STATE.get("mode")=="LIVE-ARMED" and (
+            os.environ.get("NWWS_BRIDGE_ALLOW_LIVE")!="yes"):
+        return JSONResponse(status_code=409,content={"status":"live_not_approved"})
+    if not runtime.enqueue_external_proof(proof):
+        return JSONResponse(status_code=503,content={"status":"queue_full"})
+    journal.emit("system",msg="nwws proof queued",station=proof.station,
+                 channel=proof.channel,source=proof.source,
+                 level_f=proof.level_f,climate_date=str(proof.climate_date))
+    return {"status":"queued","station":proof.station,"channel":proof.channel}
+
+
 @app.get("/api/status")
 def api_status():
     st = runtime.snapshot_state()

@@ -120,7 +120,7 @@ def parse_cli(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent |
     if not (-50 <= level <= 135):
         return None
     return ProofEvent(icao, reported, level, "cli", None, now,
-                      f"tgftp CLI{city} official TODAY maximum={level}F")
+                      f"tgftp CLI{city} official TODAY maximum={level}F",source="tgftp")
 
 
 def parse_dsm(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent | None:
@@ -158,7 +158,8 @@ def parse_dsm(text: str, icao: str, lst_off: int, now: datetime) -> ProofEvent |
         if observed > now + timedelta(minutes=5):
             continue
         return ProofEvent(icao, today, level, "dsm", observed, now,
-                          f"tgftp DSM{city} max={level}F time={stamp} LST")
+                          f"tgftp DSM{city} max={level}F time={stamp} LST",
+                          source="tgftp")
     return None
 
 

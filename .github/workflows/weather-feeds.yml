@@ -9,6 +9,7 @@ on:
       - "research/test_cross_midnight_sixhr.py"
       - "research/test_tgftp_climate.py"
       - "research/test_climate_hardening.py"
+      - "research/test_source_agnostic_bridge.py"
       - ".github/workflows/weather-feeds.yml"
   push:
     branches:
@@ -43,3 +44,5 @@ jobs:
         run: python research/test_tgftp_climate.py
       - name: Test climate-bulletin freshness, corrected DSM and AWC cooldown
         run: python research/test_climate_hardening.py
+      - name: Test signed NWWS ingress and source-agnostic temperature proofs
+        run: python research/test_source_agnostic_bridge.py

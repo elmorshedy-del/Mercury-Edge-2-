@@ -134,4 +134,5 @@ class DATISFeed:
         return [ProofEvent(
             self.icao, (obs + timedelta(hours=self.lst)).date(), level_f,
             "metar", obs, now,
-            detail=f"atisrelay-datis letter={letter} obs={obs.isoformat()}")]
+            detail=f"atisrelay-datis letter={letter} obs={obs.isoformat()}",
+            source="atisrelay-datis")]

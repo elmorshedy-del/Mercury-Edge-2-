@@ -8,7 +8,7 @@ Channels (measured live lags):
           measured availability 2.3 min typical (up to ~7)
 """
 from __future__ import annotations
-import re, gzip, io, json, logging, time, urllib.request
+import re, gzip, io, json, logging, time, urllib.request, urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, date as Date
 from decode import c10_to_f, kelvin_to_wholeC, wholeC_floor
@@ -28,8 +28,12 @@ class ProofEvent:
     obs_ts: datetime | None # when the underlying observation happened (UTC)
     seen_ts: datetime       # when WE saw it (UTC)
     detail: str = ""
+    source: str = ""    # Transport provenance; strategy acts on channel, never provider
 
 # --------------------------------------------------------------- DSM
+class IEMRateLimited(RuntimeError):
+    """Tell the orchestrator to back off the whole IEM lane."""
+
 DSBODY = re.compile(r'^(K\w{3})\s+DS\s+(?:COR\s+)?(?:(\d{4})\s+)?(\d{2})/(\d{2})\s+(.*)$')
 MAXTOK = re.compile(r'^(\d{2,3})(\d{4})$')
 
@@ -45,8 +49,14 @@ class DSMFeed:
         url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={self.pil}&fmt=text&limit=3"
         try:
             txt = _get(url).decode(errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (429,503):
+                raise IEMRateLimited(f"status_{e.code}") from e
+            log.warning("DSM poll %s HTTP %s", self.pil, e.code)
+            return []
         except Exception as e:
-            log.warning("DSM poll %s failed: %s", self.pil, e); return []
+            log.warning("DSM poll %s failed: %s", self.pil, type(e).__name__)
+            return []
         now = datetime.now(timezone.utc)
         out = []
         for ln in txt.splitlines():
@@ -63,22 +73,28 @@ class DSMFeed:
             if not mt:
                 continue
             max_f, max_hhmm = int(mt.group(1)), mt.group(2)
-            try:
-                cdate = Date(now.year, mm, dd)
-            except ValueError:
+            local_day=(now + timedelta(hours=self.lst)).date()
+            candidates=[]
+            for year in (local_day.year-1,local_day.year,local_day.year+1):
+                try:
+                    candidate=Date(year,mm,dd)
+                except ValueError:
+                    continue
+                if -1 <= (local_day-candidate).days <= 2:
+                    candidates.append(candidate)
+            if not candidates:
                 continue
-            obs = None
-            try:
-                obs = (datetime(cdate.year, cdate.month, cdate.day,
-                                int(max_hhmm[:2]) % 24, int(max_hhmm[2:]) % 60,
-                                tzinfo=timezone.utc) - timedelta(hours=self.lst))
-            except Exception:
-                pass
-            # sanity: plausible temperature, date is today/yesterday in LST
-            if not (20 <= max_f <= 130):
-                log.error("DSM sanity reject %s max=%s", self.pil, max_f); continue
-            out.append(ProofEvent(self.icao, cdate, max_f, "dsm", obs, now,
-                                  detail=f"DS {hhmm or 'final'} max {max_f}F @{max_hhmm} LST"))
+            cdate=min(candidates,key=lambda d:abs((local_day-d).days))
+            if not (-40 <= max_f <= 135 and int(max_hhmm[:2]) < 24
+                    and int(max_hhmm[2:]) < 60):
+                log.error("DSM sanity reject %s max=%s", self.pil, max_f)
+                continue
+            obs=(datetime(cdate.year,cdate.month,cdate.day,
+                          int(max_hhmm[:2]),int(max_hhmm[2:]),
+                          tzinfo=timezone.utc) - timedelta(hours=self.lst))
+            out.append(ProofEvent(self.icao,cdate,max_f,"dsm",obs,now,
+                                  detail=f"iem-afos DS {hhmm or 'final'} max {max_f}F @{max_hhmm} LST",
+                                  source="iem-afos"))
         return out
 
 # ------------------------------------------------------------- METAR
@@ -182,7 +198,7 @@ class MetarFeed:
             t = TGRP.search(raw)
             if t:
                 c10 = int(t.group(2)) / 10.0 * (-1 if t.group(1) == "1" else 1)
-                out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, f"{source}: {raw[:60]}"))
+                out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, f"{source}: {raw[:60]}",source=source))
             # Synoptic reports are stamped :51-:56 of the PRIOR hour (1751Z
             # carries the 18Z-cycle groups). Round forward to the nominal cycle
             # boundary, then require the entire preceding 6h window to stay
@@ -202,7 +218,7 @@ class MetarFeed:
                         continue
                     c10 = int(s.group(2)) / 10.0 * (-1 if s.group(1) == "1" else 1)
                     out.append(ProofEvent(self.icao, start_date, c10_to_f(c10),
-                                          "sixhr", obs, now, raw[:60]))
+                                          "sixhr", obs, now, raw[:60],source=source))
         return out
 
 # --------------------------------------------------------------- OMO
@@ -253,6 +269,6 @@ class OMOFeed:
                     c = kelvin_to_wholeC(T[i])
                     out.append(ProofEvent(icao, (obs + timedelta(hours=lst)).date(),
                                           wholeC_floor(c), "omo_floor", obs, now,
-                                          detail=f"{c}C wire"))
+                                          detail=f"madis-hf {c}C wire", source="madis-hf"))
             ds.close()
         return out
