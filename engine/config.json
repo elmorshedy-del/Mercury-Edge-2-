@@ -121,6 +121,8 @@
     "datis_poll_interval_s": 30,
     "minutetemp_poll_interval_s": 90,
     "tgftp_climate_interval_s": 30,
+    "iem_dsm_min_interval_s": 120,
+    "iem_dsm_global_spacing_s": 20,
     "tgftp_metar_interval_s": 30,
     "awc_fallback_interval_s": 90
   }
