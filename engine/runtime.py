@@ -97,6 +97,7 @@ ENGINE: KillEngine | None = None
 def _persist():
     blob = {c.key: {"proven": {str(k): v for k, v in c.state.proven_max.items()},
                     "metar": {str(k): v for k, v in c.state.metar_max.items()},
+                    "floor_proof": {str(k): v for k, v in c.state.floor_proof.items()},
                     "fired": [list(x) for x in c.state.fired]} for c in CITIES}
     json.dump(blob, open(STATE_PATH, "w"))
 
@@ -113,6 +114,7 @@ def _restore():
             continue
         c.state.proven_max = {Date.fromisoformat(k): v for k, v in s.get("proven", {}).items()}
         c.state.metar_max = {Date.fromisoformat(k): v for k, v in s.get("metar", {}).items()}
+        c.state.floor_proof = {Date.fromisoformat(k): v for k,v in s.get("floor_proof", {}).items() if isinstance(v,dict)}
         c.state.fired = {tuple(x) for x in s.get("fired", [])}
 
 def _handle(city: City, events):
@@ -156,6 +158,7 @@ def snapshot_state():
                 "icao": c.icao, "series": c.series,
                 "climate_date": d.isoformat(),
                 "proven_max": c.state.proven_max.get(d),
+                "floor_proof": c.state.floor_proof.get(d),
                 "metar_ref": c.state.metar_max.get(d),
                 "fired_count": len(c.state.fired),
                 "windows": [(t.isoformat(), typ) for t, typ in c.windows_today()[:4]],
