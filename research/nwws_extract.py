@@ -160,4 +160,4 @@ def tgftp_url(awipsid: str):
         return None
     _,wfo,num=CONFIG[suffix]
     head=("cxus" if kind=="DSM" else "cdus")+num
-    return f"https://tgftp.nws.noaa.gov/data/raw/{'cx' if kind=='DSM' else 'cd'}/{head}.{wfo.lower()}.{awipsid.lower()}.txt"
+    return f"https://tgftp.nws.noaa.gov/data/raw/{'cx' if kind=='DSM' else 'cd'}/{head}.{wfo.lower()}.{kind.lower()}.{suffix.lower()}.txt"
