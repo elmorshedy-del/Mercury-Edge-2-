@@ -23,6 +23,7 @@ from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from nwws_extract import extract_evidence
+from nwws_tgftp import TGFTPRacer
 
 HOST = "nwws-oi.weather.gov"
 ROOM = "nwws@conference.nwws-oi.weather.gov"
@@ -142,6 +143,9 @@ class RaceRecorder:
         self.validated = Counter()
         self.parse_rejected = Counter()
         self.last_evidence = None
+        self.first_seen_by_bulletin = {}
+        self.completed_pairs = set()
+        self.tgftp_racer = None
         self.last_arrival = None
         self.started_at = utcnow()
         self.last_health = time.monotonic()
@@ -181,6 +185,59 @@ class RaceRecorder:
             "historical_only":True,
         }, separators=(",",":")))
 
+    def observe_race(self, source, decoded, bootstrap=False):
+        """Pair identical climate bulletins by official WMO+AWIPS identity."""
+        key=decoded.get("report_key")
+        proof=decoded.get("evidence",[])
+        if not key or not proof:
+            return
+        seen=decoded.get("first_seen_utc")
+        if not seen:
+            return
+        by_source=self.first_seen_by_bulletin.setdefault(key,{})
+        if source in by_source:
+            return
+        by_source[source]={
+            "at":seen,"bootstrap":bool(bootstrap),
+            "max_f":proof[0]["max_f"],
+            "climate_date":proof[0]["climate_date"],
+        }
+        if len(self.first_seen_by_bulletin)>5000:
+            # Discard stale entries, retaining newest ~1000 observations.
+            self.first_seen_by_bulletin=dict(list(
+                self.first_seen_by_bulletin.items())[-1000:])
+        loggerow={
+            "source":source,"report_key":key,"station":proof[0]["station"],
+            "product_type":proof[0]["kind"],"climate_date":proof[0]["climate_date"],
+            "max_f":proof[0]["max_f"],
+            "first_seen_utc":seen,"issue_utc":decoded.get("issue_utc"),
+            "bootstrap":bool(bootstrap),
+        }
+        log.info("%s %s","TGFTP_CLIMATE" if source=="TGFTP"
+                 else "NWWS_CLIMATE",json.dumps(loggerow,separators=(",",":")))
+        if "NWWS" not in by_source or "TGFTP" not in by_source or key in self.completed_pairs:
+            return
+        self.completed_pairs.add(key)
+        nw=by_source["NWWS"]
+        tg=by_source["TGFTP"]
+        delta=(datetime.fromisoformat(tg["at"]) -
+               datetime.fromisoformat(nw["at"])).total_seconds()
+        paired={
+            "key":key,"station":proof[0]["station"],
+            "product_type":proof[0]["kind"],
+            "nwws_seen_utc":nw["at"],"tgftp_seen_utc":tg["at"],
+            "nwws_first_by_s":round(delta,3) if delta>0 else 0,
+            "tgftp_first_by_s":round(-delta,3) if delta<0 else 0,
+            "delta_tgftp_minus_nwws_s":round(delta,3),
+            "nwws_max_f":nw["max_f"],"tgftp_max_f":tg["max_f"],
+            "same_max":nw["max_f"]==tg["max_f"] and nw["climate_date"]==tg["climate_date"],
+            "fair_live_race":not (nw["bootstrap"] or tg["bootstrap"]),
+        }
+        with (self.data / f"nwws-tgftp-matches-{utcnow():%Y%m%d}.jsonl"
+              ).open("a",encoding="utf-8") as out:
+            out.write(json.dumps(paired,separators=(",",":"))+"\n")
+        log.info("NWWS_TGFTP_COMPARISON %s",json.dumps(paired,separators=(",",":")))
+
     def write(self, event):
         self.received += 1
         kind = event.get("product_type","OTHER")
@@ -205,6 +262,7 @@ class RaceRecorder:
             if parsed["evidence"]:
                 self.validated[kind] += 1
                 self.last_evidence = parsed
+                self.observe_race("NWWS",parsed)
                 log.info("NWWS_EVIDENCE %s", json.dumps(parsed,separators=(",",":")))
             else:
                 self.parse_rejected[parsed["reason"]] += 1
@@ -241,6 +299,11 @@ class RaceRecorder:
             "validated_highs":dict(self.validated),
             "invalid_climate_reports":dict(self.parse_rejected),
             "last_evidence":self.last_evidence,
+            "tgftp_comparison":{
+                "checks":self.tgftp_racer.checks,"product_updates":self.tgftp_racer.updates,
+                "unavailable":self.tgftp_racer.unavailable,
+                "paired_bulletins":len(self.completed_pairs),
+            } if self.tgftp_racer else {},
         }, separators=(",",":")))
 
 
@@ -253,6 +316,8 @@ async def race():
     location = os.environ.get("NWWS_DATA_DIR","/data")
     recorder = RaceRecorder(location)
     recorder.backfill_archived_climate()
+    recorder.tgftp_racer = TGFTPRacer(recorder)
+    asyncio.create_task(recorder.tgftp_racer.run(),name="tgftp-climate-reference")
     nickname = "weather-race"
     attempt = 0
 
