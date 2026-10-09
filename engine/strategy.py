@@ -37,6 +37,7 @@ class CityState:
     series: str
     proven_max: dict = field(default_factory=dict)   # climate_date -> int
     metar_max: dict = field(default_factory=dict)    # climate_date -> int (visible reference)
+    floor_proof: dict = field(default_factory=dict)  # climate_date -> proof that advanced max
     fired: set = field(default_factory=set)          # (ticker, kill_level) intents already emitted
 
 class KillEngine:
@@ -80,6 +81,17 @@ class KillEngine:
                           self.fat_finger_f)
                 return []
             st.proven_max[ev.climate_date] = ev.level_f
+            # Persist *which accepted proof actually raised the floor*.
+            # Equal/lower later METARs or DSMs must not overwrite the winner.
+            st.floor_proof[ev.climate_date] = {
+                "station": ev.station,
+                "channel": ev.channel,
+                "source": ev.source or ev.detail.split(":", 1)[0][:60] or "unknown",
+                "level_f": ev.level_f,
+                "obs_ts": ev.obs_ts.isoformat() if ev.obs_ts else None,
+                "seen_ts": ev.seen_ts.isoformat(),
+                "detail": ev.detail[:160],
+            }
             proven = ev.level_f
         else:
             # Retry already-proven dead buckets on subsequent proof traffic.
