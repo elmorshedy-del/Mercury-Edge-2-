@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from nwws_extract import extract_evidence
 from nwws_tgftp import TGFTPRacer
+from nwws_iem import IEMRacer
 
 HOST = "nwws-oi.weather.gov"
 ROOM = "nwws@conference.nwws-oi.weather.gov"
@@ -145,6 +146,9 @@ class RaceRecorder:
         self.last_evidence = None
         self.first_seen_by_bulletin = {}
         self.completed_pairs = set()
+        self.observations = {}
+        self.evidence_pairs = set()
+        self.iem_racer = None
         self.tgftp_racer = None
         self.last_arrival = None
         self.started_at = utcnow()
@@ -186,57 +190,107 @@ class RaceRecorder:
         }, separators=(",",":")))
 
     def observe_race(self, source, decoded, bootstrap=False):
-        """Pair identical climate bulletins by official WMO+AWIPS identity."""
-        key=decoded.get("report_key")
+        """Compare exact bulletins separately from equivalent station proofs.
+
+        A regional IEM DSM (e.g. DSMZNY) can carry a matching maximum
+        without representing the same AWIPS bulletin as DSMNYC. Never
+        report a same-bulletin speed win for that case.
+        """
         proof=decoded.get("evidence",[])
-        if not key or not proof:
+        if not proof:
             return
         seen=decoded.get("first_seen_utc")
         if not seen:
             return
-        by_source=self.first_seen_by_bulletin.setdefault(key,{})
-        if source in by_source:
-            return
-        by_source[source]={
+        key=decoded.get("report_key")
+        ev=proof[0]
+        identity=(ev["station"],ev["climate_date"],ev["kind"],
+                  ev["max_f"],ev.get("max_time_lst"))
+        evidence_id=":".join(str(p) for p in identity)
+        entry={
             "at":seen,"bootstrap":bool(bootstrap),
-            "max_f":proof[0]["max_f"],
-            "climate_date":proof[0]["climate_date"],
+            "max_f":ev["max_f"],
+            "climate_date":ev["climate_date"],
+            "station":ev["station"],
+            "verified_identity":bool(decoded.get("wire_identity_verified",source!="IEM")),
         }
+        # Always record the first observation of each station+max via each
+        # source; an older replay may be recorded but marked bootstrap.
+        row=self.observations.setdefault(evidence_id,{})
+        if source not in row:
+            row[source]=entry
+            self._compare_sources(row,evidence_id,"station_evidence",
+                                  self.evidence_pairs)
+        # Only full WMO+AWIPS IDs support exact-bulletin races.
+        if key:
+            by_source=self.first_seen_by_bulletin.setdefault(key,{})
+            if source not in by_source:
+                by_source[source]=entry
+                self._compare_sources(by_source,key,"same_bulletin",
+                                      self.completed_pairs)
+        if len(self.observations)>5000:
+            self.observations=dict(list(self.observations.items())[-1000:])
         if len(self.first_seen_by_bulletin)>5000:
-            # Discard stale entries, retaining newest ~1000 observations.
-            self.first_seen_by_bulletin=dict(list(
-                self.first_seen_by_bulletin.items())[-1000:])
+            self.first_seen_by_bulletin=dict(
+                list(self.first_seen_by_bulletin.items())[-1000:])
         loggerow={
-            "source":source,"report_key":key,"station":proof[0]["station"],
-            "product_type":proof[0]["kind"],"climate_date":proof[0]["climate_date"],
-            "max_f":proof[0]["max_f"],
+            "source":source,"report_key":key,
+            "station_evidence_key":evidence_id,
+            "station":ev["station"],"product_type":ev["kind"],
+            "climate_date":ev["climate_date"],
+            "max_f":ev["max_f"],"max_time_lst":ev.get("max_time_lst"),
             "first_seen_utc":seen,"issue_utc":decoded.get("issue_utc"),
+            "wire_identity_verified":entry["verified_identity"],
             "bootstrap":bool(bootstrap),
         }
-        log.info("%s %s","TGFTP_CLIMATE" if source=="TGFTP"
-                 else "NWWS_CLIMATE",json.dumps(loggerow,separators=(",",":")))
-        if "NWWS" not in by_source or "TGFTP" not in by_source or key in self.completed_pairs:
-            return
-        self.completed_pairs.add(key)
-        nw=by_source["NWWS"]
-        tg=by_source["TGFTP"]
-        delta=(datetime.fromisoformat(tg["at"]) -
-               datetime.fromisoformat(nw["at"])).total_seconds()
-        paired={
-            "key":key,"station":proof[0]["station"],
-            "product_type":proof[0]["kind"],
-            "nwws_seen_utc":nw["at"],"tgftp_seen_utc":tg["at"],
-            "nwws_first_by_s":round(delta,3) if delta>0 else 0,
-            "tgftp_first_by_s":round(-delta,3) if delta<0 else 0,
-            "delta_tgftp_minus_nwws_s":round(delta,3),
-            "nwws_max_f":nw["max_f"],"tgftp_max_f":tg["max_f"],
-            "same_max":nw["max_f"]==tg["max_f"] and nw["climate_date"]==tg["climate_date"],
-            "fair_live_race":not (nw["bootstrap"] or tg["bootstrap"]),
-        }
-        with (self.data / f"nwws-tgftp-matches-{utcnow():%Y%m%d}.jsonl"
-              ).open("a",encoding="utf-8") as out:
-            out.write(json.dumps(paired,separators=(",",":"))+"\n")
-        log.info("NWWS_TGFTP_COMPARISON %s",json.dumps(paired,separators=(",",":")))
+        log.info("SOURCE_CLIMATE %s",
+                 json.dumps(loggerow,separators=(",",":")))
+
+    def _compare_sources(self, reports, key, comparison_kind, completed):
+        choices=("NWWS","IEM","TGFTP")
+        for i,left in enumerate(choices):
+            for right in choices[i+1:]:
+                if left not in reports or right not in reports:
+                    continue
+                comparison_key=(key,left,right)
+                if comparison_key in completed:
+                    continue
+                completed.add(comparison_key)
+                a,b=reports[left],reports[right]
+                delta=(datetime.fromisoformat(b["at"]) -
+                       datetime.fromisoformat(a["at"])).total_seconds()
+                result={
+                    "comparison":comparison_kind,"key":key,
+                    "source_a":left,"source_b":right,
+                    "first_seen_a":a["at"],"first_seen_b":b["at"],
+                    "delta_b_minus_a_s":round(delta,3),
+                    "winner":left if delta>0 else right if delta<0 else "tie",
+                    "station":a["station"],"climate_date":a["climate_date"],
+                    "same_max":a["max_f"]==b["max_f"],
+                    "fair_live_race":not (a["bootstrap"] or b["bootstrap"]),
+                    "startup_or_old_report":a["bootstrap"] or b["bootstrap"],
+                    "same_bulletin":comparison_kind=="same_bulletin",
+                }
+                target=self.data/f"nwws-multisource-races-{utcnow():%Y%m%d}.jsonl"
+                with target.open("a",encoding="utf-8") as f:
+                    f.write(json.dumps(result,separators=(",",":"))+"\n")
+                log.info("NWWS_RACE_COMPARE %s",
+                         json.dumps(result,separators=(",",":")))
+                # Compatibility log for earlier TGFTP-specific scoreboard.
+                if comparison_kind=="same_bulletin" and left=="NWWS" and right=="TGFTP":
+                    legacy={
+                        "key":key,"station":a["station"],
+                        "nwws_seen_utc":a["at"],"tgftp_seen_utc":b["at"],
+                        "delta_tgftp_minus_nwws_s":round(delta,3),
+                        "nwws_max_f":a["max_f"],"tgftp_max_f":b["max_f"],
+                        "same_max":a["max_f"]==b["max_f"],
+                        "fair_live_race":result["fair_live_race"],
+                    }
+                    with (self.data/f"nwws-tgftp-matches-{utcnow():%Y%m%d}.jsonl"
+                          ).open("a",encoding="utf-8") as f:
+                        f.write(json.dumps(legacy,separators=(",",":"))+"\n")
+                    log.info("NWWS_TGFTP_COMPARISON %s",
+                             json.dumps(legacy,separators=(",",":")))
 
     def write(self, event):
         self.received += 1
@@ -299,6 +353,13 @@ class RaceRecorder:
             "validated_highs":dict(self.validated),
             "invalid_climate_reports":dict(self.parse_rejected),
             "last_evidence":self.last_evidence,
+            "iem_comparison":{
+                "checks":self.iem_racer.checks,"changed_snapshots":self.iem_racer.updates,
+                "errors":self.iem_racer.errors,"rate_limits":self.iem_racer.rate_limits,
+                "validated_records":self.iem_racer.verified,
+            } if self.iem_racer else {},
+            "race_pairs":len(self.completed_pairs),
+            "station_evidence_pairs":len(self.evidence_pairs),
             "tgftp_comparison":{
                 "checks":self.tgftp_racer.checks,"product_updates":self.tgftp_racer.updates,
                 "unavailable":self.tgftp_racer.unavailable,
@@ -318,6 +379,8 @@ async def race():
     recorder.backfill_archived_climate()
     recorder.tgftp_racer = TGFTPRacer(recorder)
     asyncio.create_task(recorder.tgftp_racer.run(),name="tgftp-climate-reference")
+    recorder.iem_racer = IEMRacer(recorder)
+    asyncio.create_task(recorder.iem_racer.run(),name="iem-afos-climate-reference")
     nickname = "weather-race"
     attempt = 0
 
