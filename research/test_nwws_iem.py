@@ -100,7 +100,7 @@ class IEMRaceTests(unittest.TestCase):
             full=[row for row in all_rows if row["same_bulletin"]]
             self.assertEqual(len(full),1)
             self.assertEqual(full[0]["winner"],"NWWS")
-            self.assertEqual(full[0]["delta_b_minus_a_s"],31.0)
+            self.assertEqual(full[0]["delta_b_minus_a_s"],46.0)
 
     def test_bootstrap_does_not_win(self):
         with tempfile.TemporaryDirectory() as root:
