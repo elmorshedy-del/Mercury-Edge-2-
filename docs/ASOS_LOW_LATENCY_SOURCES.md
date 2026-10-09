@@ -99,7 +99,7 @@ API exposes every member station's reading together with Kalshi's
 - Values are whole-°C conversions (71.6 = 22 °C, 86.0 = 30 °C, 87.8 = 31 °C).
   Same precision as the phone.
 - Readings appear on the free API as `code: "pending"` within ~1–2 s of
-  Kalshi receiving them. A second sample put receipt at M+2:19 to M+2:35
+  Kalshi receiving them. A second sample put receipt at M+2:19 to M+2:36
   (§7), so plan for **≈M+2:15–2:40**.
 
 **Who has what:**
@@ -496,10 +496,10 @@ Design rules:
 - **Kalshi `live_data/weather` (free) timing**, two samples on 2026-10-09:
   - 15:46–15:50Z (5 minutes, 5 cities): Kalshi `received_at` **M+2:16 to
     M+2:26**, with all stations in one ~3 s window.
-  - 15:55–15:57Z (3 minutes, NYC and Miami polled alternately every 3 s, so
-    each city every 6 s; 39 station-minutes): `received_at` **M+2:19 to
-    M+2:35** (median M+2:34).
-  - Reading first visible on the free API: median **4.0 s** (max 5.8 s) after
+  - 15:55–15:58Z (4 minutes, NYC and Miami polled alternately every 3 s, so
+    each city every 6 s; 52 station-minutes): `received_at` **M+2:19 to
+    M+2:36** (median M+2:27).
+  - Reading first visible on the free API: median **3.3 s** (max 5.8 s) after
     Kalshi's receipt. That is within the 6 s poll spacing, so Kalshi
     publishes within ~1–2 s.
   - **Total observation-minute → free API: ≈2m20s–2m40s.** A 1 s poll in the
