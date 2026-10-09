@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, date as Date
 
 import journal
-from feeds import DSMFeed, MetarFeed, OMOFeed, ProofEvent
+from feeds import DSMFeed, MetarFeed, OMOFeed, ProofEvent, IEMRateLimited
 from datis import DATISFeed
 from minutetemp import MinuteTempFeed, MinuteTempStream
 from climate_products import TGFTPClimateFeed
@@ -224,6 +224,7 @@ def loop(stop: threading.Event):
         next_due[key] = now_s + max(1, interval)
 
     def receive_completed():
+        nonlocal iem_next_at
         for key, (future, started_s) in list(pending.items()):
             if not future.done():
                 continue
@@ -254,6 +255,8 @@ def loop(stop: threading.Event):
                     "events": len(events),
                 }
             except Exception as exc:
+                if key.endswith(":iem-dsm") and isinstance(exc,IEMRateLimited):
+                    iem_next_at=max(iem_next_at,time.monotonic()+120)
                 log.warning("feed %s failed: %s", key, type(exc).__name__)
                 STATE["source_health"][key] = {
                     "status": "error",
