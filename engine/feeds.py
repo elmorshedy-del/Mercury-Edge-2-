@@ -28,6 +28,7 @@ class ProofEvent:
     obs_ts: datetime | None # when the underlying observation happened (UTC)
     seen_ts: datetime       # when WE saw it (UTC)
     detail: str = ""
+    source: str = ""    # Transport provenance; strategy acts on channel, never provider
 
 # --------------------------------------------------------------- DSM
 DSBODY = re.compile(r'^(K\w{3})\s+DS\s+(?:COR\s+)?(?:(\d{4})\s+)?(\d{2})/(\d{2})\s+(.*)$')
@@ -253,6 +254,6 @@ class OMOFeed:
                     c = kelvin_to_wholeC(T[i])
                     out.append(ProofEvent(icao, (obs + timedelta(hours=lst)).date(),
                                           wholeC_floor(c), "omo_floor", obs, now,
-                                          detail=f"{c}C wire"))
+                                          detail=f"madis-hf {c}C wire", source="madis-hf"))
             ds.close()
         return out
