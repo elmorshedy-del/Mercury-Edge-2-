@@ -14,6 +14,7 @@ from datetime import datetime,timezone
 from nwws_extract import CONFIG, extract_evidence, tgftp_url
 
 log=logging.getLogger("nwws-race")
+_REPORTED_FAILURES=set()
 AWIPS_IDS=[f"{kind}{suffix}" for suffix in CONFIG for kind in ("DSM","CLI")]
 WMO_HEADER=re.compile(
     r"(?m)^\s*(?:CXUS|CDUS)\d{2}\s+K[A-Z]{3}\s+(\d{2})(\d{2})(\d{2})\s*$")
@@ -48,7 +49,12 @@ def read_tgftp(awips: str):
             target,headers={"User-Agent":"Mercury-Edge-Research-NWWS-Race/1.0"}),
             timeout=6) as response:
             return response.read(50000).decode("utf-8",errors="replace")
-    except Exception:
+    except Exception as exc:
+        signature=(awips,type(exc).__name__,getattr(exc,"code",None))
+        if signature not in _REPORTED_FAILURES:
+            _REPORTED_FAILURES.add(signature)
+            log.warning("TGFTP_HTTP_FAILURE product=%s type=%s http_code=%s",
+                        awips,type(exc).__name__,getattr(exc,"code",None))
         return None
 
 
