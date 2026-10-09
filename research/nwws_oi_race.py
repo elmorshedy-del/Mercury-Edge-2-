@@ -25,6 +25,7 @@ from pathlib import Path
 from nwws_extract import extract_evidence
 from nwws_tgftp import TGFTPRacer
 from nwws_iem import IEMRacer
+from nwws_bridge import NWWSBridgeSender
 
 HOST = "nwws-oi.weather.gov"
 ROOM = "nwws@conference.nwws-oi.weather.gov"
@@ -149,6 +150,7 @@ class RaceRecorder:
         self.observations = {}
         self.evidence_pairs = set()
         self.iem_racer = None
+        self.bridge = None
         self.tgftp_racer = None
         self.last_arrival = None
         self.started_at = utcnow()
@@ -317,6 +319,8 @@ class RaceRecorder:
                 self.validated[kind] += 1
                 self.last_evidence = parsed
                 self.observe_race("NWWS",parsed)
+                if self.bridge:
+                    self.bridge.enqueue(parsed)
                 log.info("NWWS_EVIDENCE %s", json.dumps(parsed,separators=(",",":")))
             else:
                 self.parse_rejected[parsed["reason"]] += 1
@@ -353,6 +357,12 @@ class RaceRecorder:
             "validated_highs":dict(self.validated),
             "invalid_climate_reports":dict(self.parse_rejected),
             "last_evidence":self.last_evidence,
+            "bridge":{
+                "enabled":self.bridge.enabled,"sent":self.bridge.sent,
+                "rejected":self.bridge.rejected,"failed":self.bridge.failed,
+                "queue_full":self.bridge.queue_full,
+                "last_success":self.bridge.last_success,
+            } if self.bridge else {},
             "iem_comparison":{
                 "checks":self.iem_racer.checks,"changed_snapshots":self.iem_racer.updates,
                 "errors":self.iem_racer.errors,"rate_limits":self.iem_racer.rate_limits,
@@ -379,6 +389,8 @@ async def race():
     recorder.backfill_archived_climate()
     recorder.tgftp_racer = TGFTPRacer(recorder)
     asyncio.create_task(recorder.tgftp_racer.run(),name="tgftp-climate-reference")
+    recorder.bridge = NWWSBridgeSender()
+    asyncio.create_task(recorder.bridge.run(),name="nwws-signed-mercury-bridge")
     recorder.iem_racer = IEMRacer(recorder)
     asyncio.create_task(recorder.iem_racer.run(),name="iem-afos-climate-reference")
     nickname = "weather-race"
