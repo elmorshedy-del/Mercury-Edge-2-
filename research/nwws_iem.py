@@ -122,7 +122,7 @@ def _regional_evidence(chunk, pil, seen, issued):
 
 class IEMRacer:
     """A dedicated throttled worker; no IEM parallelism or startup wins."""
-    def __init__(self, recorder, min_spacing_s=1.8, cycle_s=95):
+    def __init__(self, recorder, min_spacing_s=9.0, cycle_s=210):
         self.recorder=recorder
         self.min_spacing_s=min_spacing_s
         self.cycle_s=cycle_s
