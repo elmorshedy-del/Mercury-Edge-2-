@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, date as Date
 
 import journal
-from feeds import DSMFeed, MetarFeed, OMOFeed
+from feeds import DSMFeed, MetarFeed, OMOFeed, ProofEvent
 from datis import DATISFeed
 from minutetemp import MinuteTempFeed, MinuteTempStream
 from climate_products import TGFTPClimateFeed
@@ -23,6 +23,20 @@ STATE_PATH = os.path.join(DATA_DIR, "state.json")
 
 STATE = {"started": None, "mode": "PAPER", "last_poll": {}, "latest_proof": {}, "sources": {}, "source_health": {}, "cities": {}}
 _state_lock = threading.Lock()
+# All vendors ultimately yield ProofEvents. HTTP/WebSocket threads never
+# touch KillEngine: the bot loop owns state and trading decisions.
+external_proofs = queue.Queue(maxsize=1000)
+
+
+def enqueue_external_proof(ev: ProofEvent) -> bool:
+    if ev.station not in {c["icao"] for c in CFG["cities"].values()}:
+        return False
+    try:
+        external_proofs.put_nowait(ev)
+        return True
+    except queue.Full:
+        return False
+
 
 def climate_today(lst_off: int) -> Date:
     return (datetime.now(timezone.utc) + timedelta(hours=lst_off)).date()
@@ -105,14 +119,17 @@ def _handle(city: City, events):
     for ev in events:
         if ev.climate_date != climate_today(city.lst):
             continue
+        provider = getattr(ev, "source", "") or ev.detail.split(":", 1)[0][:50]
         STATE["latest_proof"][f"{city.key}:{ev.channel}"] = {
-            "station": ev.station, "source": ev.detail[:120],
+            "station": ev.station, "source": provider,
+            "detail": ev.detail[:120], "climate_date": ev.climate_date.isoformat(),
             "level_f": ev.level_f,
             "obs_ts": ev.obs_ts.isoformat() if ev.obs_ts else None,
             "seen_ts": ev.seen_ts.isoformat(),
             "latency_s": round((ev.seen_ts - ev.obs_ts).total_seconds(), 1) if ev.obs_ts else None,
         }
         journal.emit("proof", city=city.key, station=ev.station, channel=ev.channel,
+                     source=provider,
                      level_f=ev.level_f, climate_date=str(ev.climate_date), detail=ev.detail[:120],
                      obs_ts=ev.obs_ts.isoformat() if ev.obs_ts else None,
                      seen_ts=ev.seen_ts.isoformat())
@@ -181,6 +198,7 @@ def loop(stop: threading.Event):
             target=stream.run, daemon=True, name="minutetemp-1m-ws"
         ).start()
     STATE["sources"] = {
+        "nwws_oi": "enabled_signed_bridge" if os.environ.get("NWWS_BRIDGE_SECRET") and os.environ.get("NWWS_BRIDGE_ENABLED") == "yes" else "disabled",
         "madis_hf": "enabled" if omo_stations else "not_configured",
         "datis": "enabled_with_backoff",
         "tgftp": "enabled",
@@ -195,6 +213,8 @@ def loop(stop: threading.Event):
     by_icao = {c.icao: c for c in CITIES}
     pending = {}   # key -> (future, city_or_none, submitted_monotonic)
     next_due = {}  # key -> monotonic timestamp
+    iem_rr = 0
+    iem_next_at = 0.0
 
     def submit(pool, key, fn, interval):
         now_s = time.monotonic()
@@ -247,6 +267,29 @@ def loop(stop: threading.Event):
     with ThreadPoolExecutor(max_workers=32, thread_name_prefix="mercury-feed") as pool:
         while not stop.is_set():
             try:
+                # Signed NWWS proofs and vendor observations share exactly
+                # the same normalized ProofEvent -> KillEngine code path.
+                # Single-threaded consumption prevents racing CityState updates.
+                for _ in range(250):
+                    try:
+                        external = external_proofs.get_nowait()
+                    except queue.Empty:
+                        break
+                    city = by_icao.get(external.station)
+                    if city:
+                        _handle(city, [external])
+                        completed = datetime.now(timezone.utc)
+                        key = f"{city.key}:nwws-oi"
+                        STATE["last_poll"][key] = completed.isoformat()
+                        STATE["source_health"][key] = {
+                            "status": "proof_ingested",
+                            "station": external.station,
+                            "channel": external.channel,
+                            "level_f": external.level_f,
+                            "completed_at": completed.isoformat(),
+                            "events": 1,
+                            "queue_remaining": external_proofs.qsize(),
+                        }
                 # Process the earliest pushed OMO proofs before any networking.
                 for _ in range(500):
                     try:
@@ -282,13 +325,12 @@ def loop(stop: threading.Event):
                     submit(pool, f"{city.key}:cli",
                            city.tgftp_cli.poll,
                            pol.get("tgftp_climate_interval_s", 30))
-                    if city.in_dsm_window(now, pol["dsm_window_halfwidth_s"]):
-                        submit(pool, f"{city.key}:tgftp-dsm",
-                               city.tgftp_dsm.poll,
-                               pol.get("tgftp_climate_interval_s", 30))
-                        submit(pool, f"{city.key}:iem-dsm",
-                               city.dsm.poll,
-                               max(10, pol["dsm_poll_interval_s"]))
+                    # Official station DSM files are cheap to check and may
+                    # update at irregular minutes (NYC example: 20:44Z).
+                    # Poll continuously, not only around guessed :15 windows.
+                    submit(pool, f"{city.key}:tgftp-dsm",
+                           city.tgftp_dsm.poll,
+                           pol.get("tgftp_climate_interval_s", 30))
 
                     if city.datis is not None:
                         # Repeated upstream 500s activate DATISFeed backoff.
@@ -303,6 +345,21 @@ def loop(stop: threading.Event):
                                lambda c=city: c.metar.poll(awc_only=True),
                                pol.get("awc_fallback_interval_s", 90))
 
+                # IEM is a useful backup, but mass parallel 2s queries
+                # caused rate-limiting. One station at a time, shared global
+                # pacing, daytime only; NWWS push & TGFTP stay independent.
+                if CITIES and time.monotonic() >= iem_next_at:
+                    for _ in range(len(CITIES)):
+                        candidate = CITIES[iem_rr % len(CITIES)]
+                        iem_rr += 1
+                        local_hour = (now + timedelta(hours=candidate.lst)).hour
+                        if 7 <= local_hour <= 20:
+                            key = f"{candidate.key}:iem-dsm"
+                            if key not in pending:
+                                submit(pool,key,candidate.dsm.poll,
+                                       pol.get("iem_dsm_min_interval_s", 120))
+                                break
+                    iem_next_at = time.monotonic() + pol.get("iem_dsm_global_spacing_s", 20)
                 if omo_stations:
                     submit(pool, "omo",
                            omo.poll, pol["omo_poll_interval_s"])
