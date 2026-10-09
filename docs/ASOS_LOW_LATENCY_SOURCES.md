@@ -11,12 +11,26 @@ Stations in scope (from `engine/config.json`): KNYC, KDEN, KPHL, KMDW, KAUS, KMI
 
 ## 1. Bottom line
 
+(Updated after a second research pass; see §1A for the measurements.)
+
+0. **What the fast bots react to is a once-a-minute data drop at ≈M+2:17, not
+   the observation itself.** Every station on the 1-minute (HF-ASOS/OMO)
+   stream reaches Kalshi in one batch about 2¼ minutes after the observation
+   minute. Bots react within seconds *of that batch*. **Kalshi republishes the
+   batch for free** at `GET /trade-api/v2/live_data/weather/{city}?detailed=true`
+   (keyless). That gives per-station readings for 69 airports in 13 metros,
+   including KMIA, KPHL, KLAX and KMDW, but **not KNYC, KDEN or KAUS**. Its
+   upstream is Synoptic's paid 1M push stream. Using either puts Mercury level
+   with the machine bots; nothing public gets ahead of it except the voice line.
 1. **The voice outlets are the only public path that delivers the 1-minute
-   observation in tens of seconds.** Every machine-readable 1-minute feed
-   (FAA → MADIS → Synoptic/vendors) currently arrives **~2–5 min** after the
-   observation. Polling the public MADIS HTTP files, as `OMOFeed` does,
-   measured **9–20 min** in a test here (§7). Nothing public delivers it in
-   single-digit seconds.
+   observation in tens of seconds.** That makes the phone the only way to be
+   *ahead* of the M+2:17 batch, by roughly 1–2 minutes. One shared dial-in
+   line cannot give one caller continuous coverage without shutting out
+   everyone else; the ~90 s auto-disconnect is how the line is shared. So
+   constant phone monitoring isn't achievable within the non-monopolizing
+   constraint. Use the machine batch for continuous coverage and the phone as
+   an opportunistic lead. Polling the public MADIS HTTP files, as `OMOFeed`
+   does, measured **9–20 min** here (§7), far behind the batch.
 2. **The voice message is whole °C, the same precision as the OMO wire.**
    The ASOS guide's own examples read "TEMPERATURE TWO ZERO CELSIUS". The phone
    wins on latency, not precision. Exact whole-°F values still only come from
@@ -31,22 +45,95 @@ Stations in scope (from `engine/config.json`): KNYC, KDEN, KPHL, KMDW, KAUS, KMI
    Central Park the phone line is the *only* public minute-level path. That is
    why it is congested, and why no amount of engineering on other feeds
    replaces it for NYC.
-5. **The highest-value untested route is the FAA's own SWIM feed.** CSS-Wx
-   publishes a dataset called *"Surface Weather Observations – One Minute
-   Observations (OMO)"* ("generated every minute") plus METAR/SPECI. It sits
-   upstream of MADIS, so it should beat the 2–5 min MADIS path, but its
-   latency, public (SCDS) availability and KNYC coverage are **unverified**.
-   Measure it before relying on it.
+5. **The FAA's own SWIM feed is the only machine path that *might* beat the
+   batch.** CSS-Wx publishes *"Surface Weather Observations – One Minute
+   Observations (OMO)"* ("generated every minute") plus METAR/SPECI. It is
+   only worth the effort if it taps the FAA collection before the stage that
+   adds most of the 2¼ minutes. Its latency, SCDS availability and KNYC
+   coverage are **unverified**. The NESG route is aimed at operational
+   industry partners, needs your own VPN connectivity, and takes 3–4 months
+   to onboard. Ask the questions in §4.4 before committing.
 6. **Settlement changed.** Since late Aug 2026 every series in the config
    (KXHIGHNY/DEN/PHIL/CHI/AUS/MIA/LAX, KXLOWNY) resolves to **The Weather
    Company** (`weather.com/kalshi`), not the NWS CLI directly. TWC's portal
    still keys on the NWS CLI (`cliId`) and marks values preliminary → official.
    See §3.
 
-**Recommended stack:** phone (fast, best-effort; only where the line carries
-OMO) → FAA CSS-Wx OMO (to be measured) → MADIS/Synoptic OMO (2–5 min, whole °C)
-for the minute layer; NWWS-OI + D-ATIS + CSS-Wx METAR for the exact-°F hourly,
-SPECI and 6-hour layer; DSM via NWWS-OI with IEM AFOS as fallback. Details in §6.
+7. **The constraint may loosen soon.** The NWS ASOS program's own plan for
+   "ASOS 2.0" (new Campbell Scientific processors) lists **"IP communications"**
+   and **"Ubiquitous access to OMO (goal)"**. Its 2026 milestone is to
+   "replace all copper voice and data lines with Internet Protocol
+   communications". As of the NWS equipment sheet (Mar–Jul 2025) all seven
+   stations still run legacy processors. Ask the ASOS program office what OMO
+   access will look like, and whether KNYC is included.
+
+**Recommended stack:** Kalshi `live_data/weather` (free) or Synoptic 1M push
+(paid) as the continuous minute layer at ≈M+2:17; the phone as an
+opportunistic lead where the line carries OMO; FAA CSS-Wx OMO once measured.
+Exact °F comes from NWWS-OI + D-ATIS + CSS-Wx METAR for the hourly, SPECI and
+6-hour reports, and from DSM via NWWS-OI with IEM AFOS as fallback. Details in §6.
+
+---
+
+## 1A. What the fast bots actually see (measured 2026-10-09)
+
+**Kalshi's own receipt times.** Kalshi's hourly temperature markets settle on
+the *Kalshi Weather Index*. Per Kalshi's CFTC filing, its primary source is
+"Synoptic the 1M HF-ASOS network 258, air_temp, exact observation minute
+only", received over a WebSocket, with a 5-minute receipt deadline. The free
+API exposes every member station's reading together with Kalshi's
+`received_at_ms`:
+
+| Event minute (UTC) | Stations | Kalshi received |
+|---|---|---|
+| 15:46 | KLGA1M, KEWR1M, KMIA1M, KPHL1M, KLAX1M, KMDW1M, KORD1M … | 15:48:16–15:48:19 |
+| 15:47 | same | 15:49:24–15:49:26 |
+| 15:48 | same | 15:50:41–15:50:43 |
+| 15:49 | same | 15:51:29–15:51:33 |
+| 15:50 | same | 15:52:17–15:52:19 |
+
+- Every 1M station in every city arrives in the **same ~3-second window**,
+  about **2 min 16–26 s** after the minute. That points to one upstream batch
+  (FAA → MADIS → Synoptic) per minute, so no vendor on this chain can be much
+  faster than the chain itself.
+- Values are whole-°C conversions (71.6 = 22 °C, 86.0 = 30 °C, 87.8 = 31 °C).
+  Same precision as the phone.
+- Readings appear on the free API as `code: "pending"` within ~1–2 s of
+  Kalshi receiving them. A second sample put receipt at M+2:19 to M+2:35
+  (§7), so plan for **≈M+2:15–2:40**.
+
+**Who has what:**
+
+| Station (daily market) | On 1M stream / Kalshi index? | Fastest public minute path |
+|---|---|---|
+| KNYC | **No** (Kalshi's NYC index uses KLGA, KEWR, KTEB, KCDW, KHPN, KFRG, KSMQ, KISP instead) | phone only |
+| KMIA | Yes (miami index) | phone, then Kalshi API ≈M+2:17 |
+| KPHL | Yes (phl-delaware-valley) | phone, then Kalshi API |
+| KLAX | Yes (la-coastal) | phone, then Kalshi API |
+| KMDW | Yes (chicago) | phone, then Kalshi API |
+| KDEN | On the 1-min stream (Wethr feed list, MADIS), not in a Kalshi index | phone, then Synoptic 1M push (paid) or MADIS |
+| KAUS | On the 1-min stream (Wethr feed list, MADIS), not in a Kalshi index | phone, then Synoptic 1M push (paid) or MADIS |
+
+**So how do bots "react in seconds"?** At the airport stations they react
+seconds after the M+2:17 batch, whether from Synoptic push, Kalshi's index
+API, or vendors whose OMO timing matches it (Wethr publishes a 2m25s
+median). The free Kalshi endpoint
+gives you that same batch. At KNYC no machine stream exists; anyone reacting
+to a minute-level KNYC move ahead of the hourly METAR is getting it from the
+voice line, or inferring it from neighbouring stations. That is why the line
+is busy at peaks.
+
+**The single-line constraint is structural.** Each ASOS publishes one dial-in
+number. The ASOS also has a separate *remote-user data modem* that NCEI
+dials on an 11-hour cycle to collect the whole-°F 1-minute archive, but
+access to it is password-controlled and authorized-only. There is no public
+second line. The only fair levers on the voice line are:
+
+- Low call-setup latency, so each attempt reaches the switch quickly.
+- Prompt hang-up once the new minute is heard.
+- Polite, jittered retry on busy.
+
+None of these turn one shared line into continuous private coverage.
 
 ---
 
@@ -134,15 +221,18 @@ Implications (not investigated further here):
   spoken Zulu time. If it advances every minute the line is OMO; if it sticks
   at the METAR time (:51–:56) the line adds nothing over METAR feeds. KNYC is
   unstaffed and must be OMO.
-- **Ways to improve access without crowding other callers:**
-  1. **Call only when it can change a decision.** Use the OMO wire or METARs to
-     arm calls only when the running max is within one whole-°C step of a live
-     bucket boundary, during the plausible peak window. This cuts call volume
-     an order of magnitude and frees the line for others.
+- **Ways to improve access without crowding other callers:** (Gating calls
+  on expectations was dropped: jumps arrive unannounced. The continuous layer
+  is now the machine batch in §1A.)
+  1. **Cut call-setup latency, not call count.** When the line frees, the
+     first INVITE to reach the far-end switch wins. Measure Twilio's
+     dial-to-answer time per number. Compare with a SIP trunk from a carrier
+     interconnecting in the station's LATA (NYC for KNYC); one well-placed
+     attempt beats many slow ones.
   2. **Hang up as soon as you've heard the first new-minute readout.** Don't
      ride the second loop if you already have the value.
-  3. **Back off on busy** with jittered exponential retry (e.g. 5 s, 10 s,
-     20 s, capped). Never dial one number from parallel trunks.
+  3. **Back off on busy** with jittered retry (a few seconds, capped). Never
+     dial one number from parallel trunks.
   4. **Validate each transcription** against the spoken Zulu time and the
      previous minute (ASOS itself flags >10 °F/2-min jumps as missing). Treat
      the phone as a *trigger*, not a proof, until the value is plausible.
@@ -151,8 +241,14 @@ Implications (not investigated further here):
      "OMO data from all ASOS locations will be made available to users upon
      request" in the final network design. It costs one email.
 - **Not an option:** the ASOS "remote user dial-in port" (modem, password,
-  authorized users only); toll-free relay services (AnyAWOS-style), which bridge
-  to the same single line and add no capacity.
+  authorized users only; NCEI's modem bank dials ~960 ASOS on an 11-hour cycle
+  for the whole-°F 1-minute archive); toll-free relay services (AnyAWOS-style),
+  which bridge to the same single line and add no capacity.
+- **Coming change:** the ASOS program plans to replace "all copper voice and
+  data lines with Internet Protocol communications" alongside ASOS 2.0
+  (2026 milestone). How the public dial-in will behave after that (capacity,
+  numbers, or retirement) isn't published. Ask the ASOS PMO
+  (suad.asos.pmo@noaa.gov) and watch for service change notices.
 
 ### 4.2 ASOS VHF ground-to-air broadcast + SDR
 
@@ -203,13 +299,29 @@ Implications (not investigated further here):
     says Wx products would go to non-NAS consumers "via combination of …
     NESG interfaces and SCDS".
   - *NESG/NEMS* (agreement portal `aa.data.faa.gov`): the dataset is listed
-    there. This route uses a VPN and is aimed at airlines, vendors and research
-    institutions, so expect paperwork and lead time.
+    there. Per the FAA's own FPAW briefing, "NESG SWIM connections are
+    reserved for industry partners that require operational data usage (e.g.,
+    airlines, vendors, etc.)". The consumer must establish its own IP service
+    connection (VPN) to the FAA security gateway. Onboarding takes "3wks –
+    month" for the test environment and **"3–4 months"** for operations. This
+    matches what you were told: in practice it's a commercial/research
+    channel, and the cost is your connectivity and engineering. FAA SWIM data
+    itself is free.
 - **Unknowns to measure:** end-to-end latency (OMO M+23 s → JMS receipt),
   temperature precision in the XML, station coverage (KNYC likely absent, like
   the MADIS feed it shares a collection chain with), and outage history.
-- **Cost:** free. **Complexity:** medium (JMS/Solace client, XML parsing,
-  FAA account and agreements).
+  Given the M+2:17 single-batch pattern in §1A, CSS-Wx only helps if it taps
+  the FAA collection *before* the stage that adds most of those two minutes.
+  Ask that directly.
+- **Questions to put to the FAA** (Data-To-Industry@faa.gov, or via the SWIFT
+  portal):
+  1. Is the CSS-Wx OMO dataset offered on SCDS, or NESG only?
+  2. What is typical latency from observation minute to JMS publication?
+  3. Is KNYC included, and are temperatures whole °C or finer?
+  4. Can a non-operational research/commercial consumer subscribe?
+- **Cost:** data free; SCDS free; NESG requires your own VPN/connectivity
+  setup. **Complexity:** medium (JMS/Solace client, XML parsing, FAA account
+  and agreements).
 
 ### 4.5 FIS-B (ADS-B UAT 978 MHz) via SDR
 
@@ -266,7 +378,8 @@ Implications (not investigated further here):
 
 | Vendor | What you get | Latency (claimed/measured) | Precision | Cost | Notes |
 |---|---|---|---|---|---|
-| **Synoptic Data** | 1-minute HF-ASOS as stations `<ICAO>1M` (e.g. KSLC1M) via a "low-latency provisional" stream from MADIS; 5-min blended into ASOS network; push streaming | "usually 2–5 min" | whole °C | Commercial, quote-based; 14-day trial | 1M upstream is MADIS, so it shares MADIS outages (2023-10 → 2026-01). In the ldm-users thread a user reported Synoptic sometimes sees METARs before TGFTP, and an NWS participant noted Synoptic has a data agreement with the FAA. |
+| **Kalshi `live_data/weather`** | Free, keyless REST: per-minute city index plus, with `detailed=true`, every member station's 1-minute reading (`pending` before final), `received_at_ms`, QC code; 13 metros, 69 stations | ≈M+2:17 receipt (measured, §1A) + publication lag (§7) | whole °C (shown in °F) | Free | Covers KMIA, KPHL, KLAX, KMDW (+KLGA, KEWR, KORD, …); not KNYC/KDEN/KAUS. Same batch the hourly-market bots use. |
+| **Synoptic Data** | 1-minute HF-ASOS as stations `<ICAO>1M` (e.g. KSLC1M) via a "low-latency provisional" stream from MADIS; 5-min blended into ASOS network; **push streaming** (WebSocket, "within 2 seconds" of Synoptic availability, higher-tier commercial plans) | "usually 2–5 min"; Kalshi receives it at ≈M+2:17 | whole °C | Commercial, quote-based; 14-day trial | 1M upstream is MADIS, so it shares MADIS outages (2023-10 → 2026-01). In the ldm-users thread a user reported Synoptic sometimes sees METARs before TGFTP, and an NWS participant noted Synoptic has a data agreement with the FAA. |
 | **Wethr.net** | Push API: METAR/SPECI, HF-METAR, DSM/CLI events; Wethr High/Low uses OMO (raw OMO "coming soon"); "accelerated" METAR feed (`metar8`) "seconds after they are taken" | Published receipt latency: hourly METAR median 1m11s–2m04s at the 7 stations; OMO median 2m25s, p90 ~3 min | per source | Paid tiers | Best public measurement of who-arrives-when. Accelerated METAR source not disclosed. **Lists no OMO for KNYC.** |
 | **minuteTemp** | REST + WebSocket, 72 cities, "every minute where 1-minute data exists" | "~2–3 s after Kalshi receives the station batch" (index product) | °F | $14.99–$89.99/mo | Rebuilds the Kalshi Weather Index used by **hourly** markets. Upstream source undisclosed. |
 | **TWC Kalshi portal** | `weather.com/kalshi/api/climate/primary`, `/api/metar` | n/a | whole °F (+°C) | free | The settlement publisher. Monitor it; don't use it as a minute feed. |
@@ -297,7 +410,9 @@ counts the seven stations.
 | 1 | ASOS phone (Twilio) | OMO voice (or METAR at towered sites in LTO mode) | whole °C | **~30–90 s** when connected | Low–medium: single line, busy at peaks, ~90 s cutoff | 7/7 (KNYC OMO guaranteed; 6 towered = check mode) | ~$0.01–0.02/min telephony | Done |
 | 2 | ASOS VHF + SDR | same as phone | whole °C | ~30–60 s | High where it exists | **0/7** | ~$100–300 per site + host | Medium |
 | 3 | FAA CSS-Wx OMO (SWIM) | OMO XML | likely whole °C (verify) | **unknown — measure**; plausibly < MADIS | FAA ops system; SCDS has no 24/7 support | ≤6/7 (KNYC likely absent; verify) | Free | Medium |
-| 4 | MADIS public / Synoptic 1M / Wethr OMO | OMO | whole °C | ~2–5 min via vendors (Wethr median 2m25s); **9–20 min measured on the public MADIS HTTP files** (§7) | Medium–low: "experimental", 27-month outage 2023–26 | 6/7 (no KNYC) | Free / paid | Low (already built) |
+| 4a | **Kalshi `live_data/weather` (detailed)** | OMO via Synoptic 1M | whole °C | **≈M+2:17** + publication lag (§7) | Same upstream as 4b; Kalshi-run | 4/7 (MIA, PHL, LAX, MDW) | **Free** | Low |
+| 4b | Synoptic 1M push / Wethr OMO | OMO | whole °C | ≈M+2:17 (Kalshi's receipt of Synoptic push); Wethr median 2m25s | Medium–low: "experimental", 27-month outage 2023–26 | 6/7 (no KNYC) | Paid | Low |
+| 4c | MADIS public HTTP files (current `OMOFeed`) | 5-min OMO subset | whole °C | **9–20 min measured** (§7) | as 4b | 6/7 (no KNYC) | Free | Built |
 | 5 | NWWS-OI (+PID201) | METAR/SPECI, DSM, CLI | **exact °F** (T-group, DSM) | seconds after NWS issuance; METAR ≈1–2 min after obs | High with dual ingest | 7/7 | Free | Low (adapter exists) |
 | 6 | FAA CSS-Wx METAR/SPECI | METAR | exact °F (T-group) | unknown; upstream of NWSTG | as #3 | 6–7/7 | Free | Medium (shared with #3) |
 | 7 | D-ATIS (atis.info) | METAR inside ATIS | exact °F (T-group) | controller-dependent; unmeasured | Medium (third-party API) | 6/7 | Free | Low |
@@ -314,9 +429,11 @@ exact-°F proof layer.
 
 ```
                  ┌─────────────────────────── minute layer (whole °C) ───────────────────────────┐
-  phone (Twilio) ─┤ fastest, gated by "is a call worth it?"; per-station OMO-mode check          │
-  CSS-Wx OMO     ─┤ (after measurement) machine-readable, no line contention                     ├─► OMO floor events
-  MADIS/Synoptic ─┤ always-on fallback, 2–5 min                                                  │   (wholeC_floor)
+  phone (Twilio) ─┤ opportunistic lead (≈M+0:30–1:30) when the line is free; OMO-mode stations  │
+  Kalshi live_data┤ continuous, free, ≈M+2:17 (MIA/PHL/LAX/MDW); poll ~:15–:35 s past each min ├─► OMO floor events
+  Synoptic 1M push┤ same batch for DEN/AUS (paid), ≤2 s after Synoptic has it                    │   (wholeC_floor)
+  CSS-Wx OMO     ─┤ (after measurement) only if it beats the M+2:17 batch                         │
+  MADIS HTTP     ─┤ last resort (measured 9–20 min)                                               │
                  └────────────────────────────────────────────────────────────────────────────────┘
                  ┌─────────────────────────── proof layer (exact °F) ───────────────────────────┐
   NWWS-OI (2 hosts) + PID201 ─┐                                                                 │
@@ -334,18 +451,23 @@ Design rules:
 2. **Tag each event with `source` and `seen_ts`.** Log arrival deltas between
    paths. That gives you a live latency league table per station, and it is
    the only way to settle the unknowns in rows 3, 6, 7 and 8.
-3. **Phone gating, not phone polling.** Arm a call when (a) the station is in
-   its peak window, (b) the running max is within one °C step of a priced
-   bucket boundary, and (c) the line was last confirmed in OMO mode.
-   Otherwise rely on the wire. This keeps you a light, non-disruptive caller
-   and puts your call budget where it pays.
+3. **The machine batch is the continuous layer; the phone is the lead.**
+   Jumps are unpredictable, so gating calls on expectations doesn't work.
+   But a single shared line can't be held continuously either. Run the
+   machine batch continuously for every station that has it. That bounds
+   your worst case at ≈M+2:17, the same as the bots. Treat the phone as a
+   bonus that sometimes gets you ~1–2 min ahead, with fast call setup, prompt
+   hang-up and jittered retry on busy. Only call stations whose line is
+   confirmed in OMO mode.
 4. **Health checks per source.** Watch for staleness (no new OMO in N min),
    phone busy-rate, NWWS disconnects (expect planned transitions) and MADIS
    outages. On failure, the next layer takes over automatically. Nothing
    upstream of the engine should be single-path.
 5. **KNYC special case:** phone is the only minute path. Pair it with fast
-   proof-layer ingest (NWWS-OI METAR + 6-hr + DSM), and send the NWS request
-   in §4.1 step 5.
+   proof-layer ingest (NWWS-OI METAR + 6-hr + DSM). Watch the eight NYC-area
+   1M stations on Kalshi's free NYC index (KLGA, KEWR, KTEB, …) as a
+   *context* signal only; they are not the settlement station. Send the NWS
+   request in §4.1 step 5.
 
 ---
 
@@ -371,30 +493,65 @@ Design rules:
   15-minute sample, so treat it as a warning, not a rate. Before trusting
   `OMOFeed`, log `seen_ts − obs_ts` for a week. If it looks like this, take the
   OMO layer from a push source (Synoptic 1M, CSS-Wx) instead.
+- **Kalshi `live_data/weather` (free) timing**, two samples on 2026-10-09:
+  - 15:46–15:50Z (5 minutes, 5 cities): Kalshi `received_at` **M+2:16 to
+    M+2:26**, with all stations in one ~3 s window.
+  - 15:55–15:57Z (3 minutes, NYC and Miami polled alternately every 3 s, so
+    each city every 6 s; 39 station-minutes): `received_at` **M+2:19 to
+    M+2:35** (median M+2:34).
+  - Reading first visible on the free API: median **4.0 s** (max 5.8 s) after
+    Kalshi's receipt. That is within the 6 s poll spacing, so Kalshi
+    publishes within ~1–2 s.
+  - **Total observation-minute → free API: ≈2m20s–2m40s.** A 1 s poll in the
+    batch window would put you within ~1 s of anyone on Synoptic's push
+    stream.
 - **Station coverage of the OMO wire:** KNYC absent; the other six present
   (§4.6).
 - **D-ATIS content:** KDEN D-ATIS carries the T-group (§4.3).
 
 ## 8. Next actions
 
-1. Register on the SWIFT portal (`portal.swim.faa.gov`) and check whether CSS-Wx
-   *Surface Weather Observations – OMO* and *METAR/SPECI* are offered on SCDS.
-   If not, request them through the FAA agreement portal (NESG). Measure
-   latency and coverage for a week.
-2. For each towered station, log the phone's spoken Zulu time for a day to
+1. **Today, free:** add a `KalshiIndexFeed` that polls
+   `live_data/weather/{city}?last_sec=180&detailed=true` for miami,
+   phl-delaware-valley, la-coastal and chicago once a second during the
+   batch window (≈:10–:40 s past each minute). Emit `omo_floor` events from
+   the KMIA1M, KPHL1M, KLAX1M and KMDW1M readings, `pending` included.
+   That replaces the 9–20 min MADIS path with ≈M+2:17 at zero cost. Send the
+   requests authenticated so they count against a published budget (Basic
+   tier: 200 read tokens/s, 10 per request); limits for keyless calls aren't
+   published.
+2. **For KDEN/KAUS:** get a Synoptic quote for push streaming of KDEN1M and
+   KAUS1M (network 258). It's the same batch Kalshi consumes.
+3. Register on the SWIFT portal (`portal.swim.faa.gov`) and check whether
+   CSS-Wx *Surface Weather Observations – OMO* and *METAR/SPECI* are offered
+   on SCDS. If not, put the §4.4 questions to Data-To-Industry@faa.gov before
+   committing to a 3–4 month NESG onboarding. Measure latency against the
+   M+2:17 batch.
+4. For each towered station, log the phone's spoken Zulu time for a day to
    classify OMO vs METAR mode. Drop phone calls at stations stuck in METAR mode.
-3. Get NWWS-OI credentials (pending per `NWWS_APPLICATION.md`). Point the
+5. Measure Twilio dial-to-answer time per ASOS number and compare a
+   local-interconnect SIP trunk (§4.1). Faster setup is the only fair lever on
+   a shared line.
+6. Get NWWS-OI credentials (pending per `NWWS_APPLICATION.md`). Point the
    adapter at `nwws-oi-bldr` / `nwws-oi-cprk` with failover.
-4. Add a D-ATIS poller for the six airports (window :50–:58 and around
+7. Add a D-ATIS poller for the six airports (window :50–:58 and around
    SPECIs) as a second exact-°F path, and log its lead/lag against NWWS.
-5. Flip KDEN to `"omo": true` after confirming in a replay that its whole-°C
+8. Flip KDEN to `"omo": true` after confirming in a replay that its whole-°C
    floors behave.
-6. Email NWS ASOS/AOMC about networked one-minute data for KNYC.
-7. Separately: re-validate the decode rules against TWC "official" values for
-   days after 2026-08-27.
+9. Email the NWS ASOS program office (suad.asos.pmo@noaa.gov; AOMC
+   aomc@noaa.gov) about (a) networked one-minute data for KNYC and (b) the
+   ASOS 2.0 "ubiquitous access to OMO" goal and what the copper-to-IP
+   change means for the public dial-in.
+10. Separately: re-validate the decode rules against TWC "official" values for
+    days after 2026-08-27.
 
 ## 9. Open questions (not verifiable from public docs)
 
+- Rate limits for keyless `live_data` calls (authenticated budgets are
+  published), and whether Kalshi's API terms cover this use. Check before
+  production.
+- What the ASOS 2.0 copper-to-IP change does to the public dial-in, and when
+  "ubiquitous access to OMO" ships; whether KNYC will have it.
 - Number of simultaneous callers per ASOS voice line (no public spec found).
 - CSS-Wx OMO latency, precision and KNYC coverage.
 - The upstream source of Wethr's "accelerated" METAR feed and of minuteTemp's
@@ -426,3 +583,16 @@ Design rules:
 - TWC Kalshi portal: https://weather.com/kalshi
 - D-ATIS API: https://atis.info/api/KDEN
 - FIS-B decoders: https://github.com/rand-projects/fisb-decode ; https://github.com/mutability/dump978
+
+Second-pass sources (2026-10-09):
+
+- Kalshi API, Get Weather Index: https://docs.kalshi.com/api-reference/live-data/get-weather-index (endpoint `https://external-api.kalshi.com/trade-api/v2/live_data/weather/{city}`)
+- Kalshi CFTC self-certification, Kalshi Weather Index methodology (Greater Boston config; primary source "Synoptic the 1M HF-ASOS network 258", WebSocket receipt, D = 300 s): https://www.cftc.gov/filings/ptc/ptc10012630809.pdf
+- Kalshi API rate limits: https://docs.kalshi.com/getting_started/rate_limits
+- minuteTemp, Kalshi Weather Index explained (member stations per city): https://minutetemp.com/docs/kalshi-weather-index
+- Synoptic push streaming: https://docs.synopticdata.com/services/push-streaming ; latency: https://docs.synopticdata.com/services/latency-of-observation-data-on-the-synoptic-platfo
+- NWS ASOS PM briefing to FPAW (2023), ASOS 2.0 "IP communications", "Ubiquitous access to OMO (goal)", copper→IP by end of 2026: https://fpaw.aero/sites/default/files/163/2-boutin-decadal-look-asos-lifecycle-upgrades.pdf
+- NWS Nebraska, ASOS 2.0 update (2026): https://engineering.uiowa.edu/sites/engineering.uiowa.edu/files/2026-03/HeartlandConferenceBrief.pdf
+- Campbell Scientific ASOS 2.0 case study (Jan 2026): https://www.campbellsci.com/resources/case-studies/us-asos-weather-network
+- NWS ASOS FAQ (207 FAA sites → AWOS-C, 2025–2029) and equipment sheet: https://www.weather.gov/asos/faq.html ; https://www.weather.gov/media/asos/ASOS%20Sites%20by%20Equipment%20As%20Of%203_18_2025%20-%20T-Td%207_1_2025.xlsx
+- NCEI archive request describing the modem-bank collection of ASOS 1-/5-minute data (11-hour dial cycle, ~960 sites): https://www.ncei.noaa.gov/archive/atrac/export/2022-01-13T14-11-44.pdf?id=65639
