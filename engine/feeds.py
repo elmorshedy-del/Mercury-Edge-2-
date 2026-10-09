@@ -198,7 +198,7 @@ class MetarFeed:
             t = TGRP.search(raw)
             if t:
                 c10 = int(t.group(2)) / 10.0 * (-1 if t.group(1) == "1" else 1)
-                out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, f"{source}: {raw[:60]}"))
+                out.append(ProofEvent(self.icao, cdate, c10_to_f(c10), "metar", obs, now, f"{source}: {raw[:60]}",source=source))
             # Synoptic reports are stamped :51-:56 of the PRIOR hour (1751Z
             # carries the 18Z-cycle groups). Round forward to the nominal cycle
             # boundary, then require the entire preceding 6h window to stay
@@ -218,7 +218,7 @@ class MetarFeed:
                         continue
                     c10 = int(s.group(2)) / 10.0 * (-1 if s.group(1) == "1" else 1)
                     out.append(ProofEvent(self.icao, start_date, c10_to_f(c10),
-                                          "sixhr", obs, now, raw[:60]))
+                                          "sixhr", obs, now, raw[:60],source=source))
         return out
 
 # --------------------------------------------------------------- OMO
