@@ -8,7 +8,7 @@ Channels (measured live lags):
           measured availability 2.3 min typical (up to ~7)
 """
 from __future__ import annotations
-import re, gzip, io, json, logging, time, urllib.request
+import re, gzip, io, json, logging, time, urllib.request, urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, date as Date
 from decode import c10_to_f, kelvin_to_wholeC, wholeC_floor
@@ -31,6 +31,9 @@ class ProofEvent:
     source: str = ""    # Transport provenance; strategy acts on channel, never provider
 
 # --------------------------------------------------------------- DSM
+class IEMRateLimited(RuntimeError):
+    """Tell the orchestrator to back off the whole IEM lane."""
+
 DSBODY = re.compile(r'^(K\w{3})\s+DS\s+(?:COR\s+)?(?:(\d{4})\s+)?(\d{2})/(\d{2})\s+(.*)$')
 MAXTOK = re.compile(r'^(\d{2,3})(\d{4})$')
 
@@ -46,8 +49,14 @@ class DSMFeed:
         url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={self.pil}&fmt=text&limit=3"
         try:
             txt = _get(url).decode(errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (429,503):
+                raise IEMRateLimited(f"status_{e.code}") from e
+            log.warning("DSM poll %s HTTP %s", self.pil, e.code)
+            return []
         except Exception as e:
-            log.warning("DSM poll %s failed: %s", self.pil, e); return []
+            log.warning("DSM poll %s failed: %s", self.pil, type(e).__name__)
+            return []
         now = datetime.now(timezone.utc)
         out = []
         for ln in txt.splitlines():
@@ -64,22 +73,28 @@ class DSMFeed:
             if not mt:
                 continue
             max_f, max_hhmm = int(mt.group(1)), mt.group(2)
-            try:
-                cdate = Date(now.year, mm, dd)
-            except ValueError:
+            local_day=(now + timedelta(hours=self.lst)).date()
+            candidates=[]
+            for year in (local_day.year-1,local_day.year,local_day.year+1):
+                try:
+                    candidate=Date(year,mm,dd)
+                except ValueError:
+                    continue
+                if -1 <= (local_day-candidate).days <= 2:
+                    candidates.append(candidate)
+            if not candidates:
                 continue
-            obs = None
-            try:
-                obs = (datetime(cdate.year, cdate.month, cdate.day,
-                                int(max_hhmm[:2]) % 24, int(max_hhmm[2:]) % 60,
-                                tzinfo=timezone.utc) - timedelta(hours=self.lst))
-            except Exception:
-                pass
-            # sanity: plausible temperature, date is today/yesterday in LST
-            if not (20 <= max_f <= 130):
-                log.error("DSM sanity reject %s max=%s", self.pil, max_f); continue
-            out.append(ProofEvent(self.icao, cdate, max_f, "dsm", obs, now,
-                                  detail=f"DS {hhmm or 'final'} max {max_f}F @{max_hhmm} LST"))
+            cdate=min(candidates,key=lambda d:abs((local_day-d).days))
+            if not (-40 <= max_f <= 135 and int(max_hhmm[:2]) < 24
+                    and int(max_hhmm[2:]) < 60):
+                log.error("DSM sanity reject %s max=%s", self.pil, max_f)
+                continue
+            obs=(datetime(cdate.year,cdate.month,cdate.day,
+                          int(max_hhmm[:2]),int(max_hhmm[2:]),
+                          tzinfo=timezone.utc) - timedelta(hours=self.lst))
+            out.append(ProofEvent(self.icao,cdate,max_f,"dsm",obs,now,
+                                  detail=f"iem-afos DS {hhmm or 'final'} max {max_f}F @{max_hhmm} LST",
+                                  source="iem-afos"))
         return out
 
 # ------------------------------------------------------------- METAR
