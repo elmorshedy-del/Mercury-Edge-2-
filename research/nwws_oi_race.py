@@ -22,6 +22,7 @@ import time
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from nwws_extract import extract_evidence
 
 HOST = "nwws-oi.weather.gov"
 ROOM = "nwws@conference.nwws-oi.weather.gov"
@@ -138,16 +139,56 @@ class RaceRecorder:
         self.received = 0
         self.matched = 0
         self.types = Counter()
+        self.validated = Counter()
+        self.parse_rejected = Counter()
+        self.last_evidence = None
         self.last_arrival = None
         self.started_at = utcnow()
         self.last_health = time.monotonic()
 
+    def backfill_archived_climate(self):
+        """Parse earlier stored NWWS raw products without falsifying live latency.
+
+        The first collector archived wire payloads but never decoded their
+        maxima. This handles that research debt without changing the recorded
+        first_seen_utc for any product.
+        """
+        product_count = 0
+        successes = []
+        failures = Counter()
+        for path in sorted(self.data.glob("nwws-oi-first-seen-*.jsonl"))[-4:]:
+            try:
+                with path.open(encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("product_type") not in ("DSM","CLI"):
+                                continue
+                            product_count += 1
+                            parsed = extract_evidence(entry)
+                            if parsed["evidence"]:
+                                successes.append(parsed)
+                            else:
+                                failures[parsed["reason"]] += 1
+                        except (ValueError, TypeError, KeyError):
+                            failures["archive_record_invalid"] += 1
+            except OSError:
+                failures["archive_unreadable"] += 1
+        log.info("NWWS_BACKFILL %s", json.dumps({
+            "at":utcnow().isoformat(), "stored_climate_bulletins":product_count,
+            "verified":len(successes), "rejected":dict(failures),
+            "evidence":successes[-40:],
+            "historical_only":True,
+        }, separators=(",",":")))
+
     def write(self, event):
-        now = utcnow()
         self.received += 1
         kind = event.get("product_type","OTHER")
         self.types[kind] += 1
-        if not event.get("stations"):
+        # NOAA delivers one national room. It is not a per-airport query.
+        # SYNBOU embeds OLD METAR observations in a forecast: never record
+        # that as a direct, competitive ASOS observation.
+        if not event.get("stations") or kind not in ("DSM","CLI","METAR_OR_SPECI"):
             return
         digest = event["payload_sha256"] + "/" + event["awipsid"]
         if digest in self.seen:
@@ -157,14 +198,35 @@ class RaceRecorder:
         if len(self.recent) == self.recent.maxlen:
             self.seen = set(self.recent)
         self.matched += 1
-        self.last_arrival = now.isoformat()
-        datepart = now.strftime("%Y%m%d")
+        self.last_arrival = event["first_seen_utc"]
+        if kind in ("DSM","CLI"):
+            parsed = extract_evidence(event)
+            event["parsed"] = parsed
+            if parsed["evidence"]:
+                self.validated[kind] += 1
+                self.last_evidence = parsed
+                log.info("NWWS_EVIDENCE %s", json.dumps(parsed,separators=(",",":")))
+            else:
+                self.parse_rejected[parsed["reason"]] += 1
+                log.warning("NWWS_UNUSABLE %s",json.dumps({
+                    "awipsid":event["awipsid"],"station":parsed.get("station"),
+                    "received_at":event["first_seen_utc"],"reason":parsed["reason"]
+                },separators=(",",":")))
+        else:
+            # A direct METAR/SPECI is never one-minute OMO. Station/report
+            # timestamp and precision are retained, but not promoted as a
+            # trading-grade proof without parser validation.
+            log.info("NWWS_METAR_CANDIDATE %s",json.dumps({
+                "awipsid":event["awipsid"],
+                "stations":event["stations"],"report_stamps":event["report_stamps"],
+                "received_at":event["first_seen_utc"]
+            },separators=(",",":")))
+        datepart = utcnow().strftime("%Y%m%d")
         dest = self.data / f"nwws-oi-first-seen-{datepart}.jsonl"
         with dest.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, separators=(",",":"))+"\n")
-        # Log useful race parameters, NEVER private credentials.
-        summary = {k:v for k,v in event.items() if k not in ("raw","payload_sha256")}
-        log.info("NWWS_RECEIPT %s", json.dumps(summary, separators=(",",":")))
+        summary = {k:v for k,v in event.items() if k not in ("raw","payload_sha256","parsed")}
+        log.info("NWWS_RECEIPT %s",json.dumps(summary,separators=(",",":")))
 
     def heartbeat(self):
         t = time.monotonic()
@@ -176,6 +238,9 @@ class RaceRecorder:
             "matched_station_products":self.matched,
             "last_matched_utc":self.last_arrival,
             "kind_counts":dict(self.types),
+            "validated_highs":dict(self.validated),
+            "invalid_climate_reports":dict(self.parse_rejected),
+            "last_evidence":self.last_evidence,
         }, separators=(",",":")))
 
 
@@ -187,6 +252,7 @@ async def race():
         raise RuntimeError("NWWS_USER and NWWS_PASS must be supplied in Railway Variables")
     location = os.environ.get("NWWS_DATA_DIR","/data")
     recorder = RaceRecorder(location)
+    recorder.backfill_archived_climate()
     nickname = "weather-race"
     attempt = 0
 
