@@ -103,9 +103,9 @@ class ClimateExtraction(unittest.TestCase):
 
     def test_tgftp_exact_path(self):
         self.assertEqual(tgftp_url("DSMNYC"),
-            "https://tgftp.nws.noaa.gov/data/raw/cx/cxus41.kokx.dsm.nyc.txt"
-        ) if False else self.assertEqual(tgftp_url("DSMNYC"),
             "https://tgftp.nws.noaa.gov/data/raw/cx/cxus41.kokx.dsm.nyc.txt")
+        self.assertEqual(tgftp_url("CLIDEN"),
+            "https://tgftp.nws.noaa.gov/data/raw/cd/cdus45.kbou.cli.den.txt")
 
     def test_wmo_month_and_year_boundary(self):
         dt=datetime(2027,1,1,0,2,tzinfo=timezone.utc)
