@@ -59,6 +59,8 @@ body{background:var(--bg);color:var(--txt);font:14px/1.5 var(--sans);padding-bot
 .city .icao{font:11px var(--mono);color:var(--faint)}
 .city .max{font:700 30px/1 var(--mono);margin:8px 0 2px}
 .city .ref{font:11px var(--mono);color:var(--dim)}
+.city .floor-source{font:11px/1.5 var(--mono);color:var(--cyan);overflow-wrap:anywhere;margin-top:4px}
+.city .floor-time{font:10px/1.45 var(--mono);color:var(--faint)}
 .ladder{margin-top:9px;display:flex;flex-direction:column;gap:3px}
 .rung{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--dim);padding:2px 6px;border-radius:3px;background:#0a0f15}
 .rung.dead{opacity:.35;text-decoration:line-through}
@@ -193,6 +195,9 @@ async function status(){
 let boards={};
 async function loadBoards(){try{boards=await j("/api/boards");}catch(e){}}
 
+function esc(s){return String(s??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]))}
+function fmtET(iso){const dt=new Date(iso);return isNaN(dt.getTime())?"—":dt.toLocaleString("en-US",{timeZone:"America/New_York",hour12:false,month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"})+" ET"}
+
 function renderCities(cities){
   if(!cities)return;
   $("cities").innerHTML=Object.entries(cities).map(([k,c])=>{
@@ -202,9 +207,23 @@ function renderCities(cities){
       const hot=r.bid!=null&&r.bid>=15&&!dead;
       return `<div class="rung ${dead?"dead":hot?"hot":""}"><span>${r.sub||r.ticker.split("-").pop()}</span><span class="q">${r.bid??"–"}/${r.ask??"–"}</span></div>`;
     }).join("");
+    const winning=c.floor_proof;
+    // This is the proof that RAISED the proven max, not the latest METAR.
+    // Persisted older ratchets without provenance are explicitly unknown.
+    const source=winning?.source||"";
+    const channel=winning?.channel||"";
+    const floorBy=c.proven_max==null?"Awaiting accepted evidence":
+      (winning?(`${esc(source||"unknown source")} · ${esc(channel.toUpperCase())}`):
+               "Previous floor · source not recorded");
+    const observed=winning?.obs_ts
+        ?`observed ${fmtET(winning.obs_ts)}`:"";
+    const arrived=winning?.seen_ts?`received ${fmtET(winning.seen_ts)}`:"";
+    const times=[observed,arrived].filter(Boolean).join(" · ");
     return `<div class="city"><div class="hd"><span class="nm">${k}</span><span class="icao">${c.icao}</span></div>
       <div class="max">${c.proven_max??"—"}<span style="font-size:13px;color:var(--faint)">°F</span></div>
-      <div class="ref">proven max · METAR ref ${c.metar_ref??"—"}</div>
+      <div class="floor-source">Floor set by: ${floorBy}</div>
+      <div class="floor-time">${times||"—"}</div>
+      <div class="ref">METAR reference: ${c.metar_ref??"—"}°F · separate metric</div>
       <div class="ladder">${ladder||'<div class="rung">board loading…</div>'}</div></div>`;
   }).join("");
 }
@@ -258,7 +277,7 @@ async function feed(){
     $("feed").innerHTML=evs.map(e=>{
       const t=new Date(e.ts).toLocaleTimeString("en-US",{timeZone:"America/New_York",hour12:false});
       let msg="";
-      if(e.kind==="proof")msg=`${e.city} ${e.channel} proves max ≥ ${e.level_f}°F`;
+      if(e.kind==="proof")msg=`${e.city} ${e.source||"source unknown"} (${e.channel}) proves max ≥ ${e.level_f}°F`;
       else if(e.kind==="intent")msg=`⚡ INTENT ${e.ticker} — ${e.reason||""}`;
       else if(e.kind==="fill")msg=`✓ FILL ${e.ticker} ${Math.round(e.sim_fill_contracts||0)} @ ${e.sim_avg_px_cents}¢`;
       else if(e.kind==="guard")msg=`⛔ ${e.msg}`;
