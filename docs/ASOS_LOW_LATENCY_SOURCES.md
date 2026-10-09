@@ -13,15 +13,16 @@ Stations in scope (from `engine/config.json`): KNYC, KDEN, KPHL, KMDW, KAUS, KMI
 
 (Updated after a second research pass; see §1A for the measurements.)
 
-0. **What the fast bots react to is a once-a-minute data drop at ≈M+2:17, not
-   the observation itself.** Every station on the 1-minute (HF-ASOS/OMO)
-   stream reaches Kalshi in one batch about 2¼ minutes after the observation
-   minute. Bots react within seconds *of that batch*. **Kalshi republishes the
-   batch for free** at `GET /trade-api/v2/live_data/weather/{city}?detailed=true`
-   (keyless). That gives per-station readings for 69 airports in 13 metros,
-   including KMIA, KPHL, KLAX and KMDW, but **not KNYC, KDEN or KAUS**. Its
-   upstream is Synoptic's paid 1M push stream. Using either puts Mercury level
-   with the machine bots; nothing public gets ahead of it except the voice line.
+0. **The fastest daily-market bots are ~2 minutes ahead of every machine
+   1-minute feed (§1B, KLAX case).** Every station on the 1-minute
+   (HF-ASOS/OMO) stream reaches Kalshi/Synoptic in one batch about
+   **M+2:15–2:40**. **Kalshi republishes the batch for free** at
+   `GET /trade-api/v2/live_data/weather/{city}?detailed=true` (keyless), for
+   69 airports in 13 metros including KMIA, KPHL, KLAX and KMDW, but **not
+   KNYC, KDEN or KAUS**. On KLAX, though, the decisive moves started at
+   **M+21 s (Aug 29) and M+53 s (Aug 30)**. Both buckets were at 1¢ before
+   the batch existed. The batch is a solid continuous fallback, but it
+   **cannot win the single-minute events**; that needs voice-line speed.
 1. **The voice outlets are the only public path that delivers the 1-minute
    observation in tens of seconds.** That makes the phone the only way to be
    *ahead* of the M+2:17 batch, by roughly 1–2 minutes. One shared dial-in
@@ -67,11 +68,13 @@ Stations in scope (from `engine/config.json`): KNYC, KDEN, KPHL, KMDW, KAUS, KMI
    stations still run legacy processors. Ask the ASOS program office what OMO
    access will look like, and whether KNYC is included.
 
-**Recommended stack:** Kalshi `live_data/weather` (free) or Synoptic 1M push
-(paid) as the continuous minute layer at ≈M+2:17; the phone as an
-opportunistic lead where the line carries OMO; FAA CSS-Wx OMO once measured.
-Exact °F comes from NWWS-OI + D-ATIS + CSS-Wx METAR for the hourly, SPECI and
-6-hour reports, and from DSM via NWWS-OI with IEM AFOS as fallback. Details in §6.
+**Recommended stack:** the voice line is the competitive path for
+single-minute peaks at OMO-mode stations; per §1B the first movers trade
+20–55 s after the minute. Kalshi `live_data/weather` (free) or Synoptic 1M
+push (paid) is the continuous fallback at ≈M+2:15–2:40. FAA CSS-Wx OMO is
+worth pursuing only if measured under ~30 s. Exact °F comes from NWWS-OI +
+D-ATIS + CSS-Wx METAR for the hourly, SPECI and 6-hour reports, and from DSM
+via NWWS-OI with IEM AFOS as fallback. Details in §6.
 
 ---
 
@@ -114,14 +117,14 @@ API exposes every member station's reading together with Kalshi's
 | KDEN | On the 1-min stream (Wethr feed list, MADIS), not in a Kalshi index | phone, then Synoptic 1M push (paid) or MADIS |
 | KAUS | On the 1-min stream (Wethr feed list, MADIS), not in a Kalshi index | phone, then Synoptic 1M push (paid) or MADIS |
 
-**So how do bots "react in seconds"?** At the airport stations they react
-seconds after the M+2:17 batch, whether from Synoptic push, Kalshi's index
-API, or vendors whose OMO timing matches it (Wethr publishes a 2m25s
-median). The free Kalshi endpoint
-gives you that same batch. At KNYC no machine stream exists; anyone reacting
-to a minute-level KNYC move ahead of the hourly METAR is getting it from the
-voice line, or inferring it from neighbouring stations. That is why the line
-is busy at peaks.
+**So how do bots "react in seconds"?** *Corrected by §1B.* Many react
+seconds after the M+2:17 batch (Synoptic push, Kalshi's index API, or vendors
+such as Wethr with a 2m25s median). The **first movers on the daily markets
+are faster**: on KLAX they traded 21–53 s after the observation minute.
+Among public channels, only the ASOS voice line delivers that. The FAA's
+CSS-Wx OMO is the only other conceivable channel, and its latency is
+unknown. At KNYC no machine stream exists at all, so the voice line is the
+only minute-level path. That is why it is busy at peaks.
 
 **The single-line constraint is structural.** Each ASOS publishes one dial-in
 number. The ASOS also has a separate *remote-user data modem* that NCEI
@@ -134,6 +137,77 @@ second line. The only fair levers on the voice line are:
 - Polite, jittered retry on busy.
 
 None of these turn one shared line into continuous private coverage.
+
+---
+
+## 1B. Case study: KLAX, Aug 29 and Aug 30 2026 (four clocks cross-referenced)
+
+Sources: DSMLAX/CLILAX via IEM AFOS (with issuance times), METAR/SPECI and
+MADIS 5-minute HF-METAR via IEM, and Synoptic 1-minute KLAX1M with arrival
+times via Kalshi `live_data/weather/la-coastal?detailed=true`. Those points
+are a pre-launch backfill (`receipt_basis: synoptic_latency`), so arrival =
+observation + Synoptic's measured ingest latency, minute-granular. Trades
+come from Kalshi `markets/trades` (exchange timestamps, ms). NCEI's
+whole-°F 1-minute archive for KLAX is **missing Aug 27–30**, so it could not
+be used.
+
+**Aug 29 (KXHIGHLAX-26AUG29; settled "87° or above")**
+
+| Clock | Time (UTC) | What |
+|---|---|---|
+| Sensor (ASOS minute label) | **19:31** | KLAX1M = 31 °C (87.8 °F) for **exactly one minute**; 30 °C at 19:30 and 19:32 |
+| Official, after the fact | 19:31 (11:31 AM LST) | DSM and CLI: **MAXIMUM 87 at 11:31 AM** |
+| Market, first sweep | **19:31:21.166** | One aggressive order swept "87° or above" YES 0.55→0.75 across ~80 levels; 7 ms later "85° to 86°" sold 0.43→0.29 |
+| Market, done | 19:32:00–19:32:15 | 85–86° at 0.01–0.07; 87+ at 0.91–0.99 |
+| 1-minute machine feed | ≈19:33:15–19:34:00 | Synoptic/Kalshi arrival of the 19:31 reading (backfill says 19:34:00; live tests give M+2:15–2:40) |
+| 5-minute HF-METAR | never | 19:30 and 19:35 samples both 30 °C, so the 31 °C minute never appears |
+| METAR | 19:53 | T0294 → 85 °F (the hourly METARs never showed 87) |
+| First official publication of 87 | 22:07 | DSM (valid to 14:00 LST) |
+
+**Aug 30 (KXHIGHLAX-26AUG30; settled "84° or above")**
+
+| Clock | Time (UTC) | What |
+|---|---|---|
+| Sensor | **18:12** | KLAX1M first shows 29 °C (84.2 °F), proving max ≥ 84; plateau 18:12–18:18 |
+| Official | 18:18 (10:18 AM LST) | DSM/CLI: **MAXIMUM 84 at 10:18 AM** |
+| Market, first sweep | **18:12:53.531** | "84° or above" YES 0.74→0.87; "82° to 83°" sold 0.26→0.13 in the same 30 ms |
+| Market, done | ~18:13:15 | 82–83° at 0.01–0.04; 84+ at 0.88–0.99 |
+| 1-minute machine feed | ≈18:14:15–18:15:00 | arrival of the 18:12 reading |
+| METAR | 17:53 / 18:53 | 83 °F / 81 °F (never 84) |
+
+**What the cross-reference establishes**
+
+1. **"Observation time" in these feeds is the sensor minute, not publication
+   time.** The 1-minute stream labels the max minute 19:31. The ASOS's own
+   DSM/CLI time of max is 11:31 LST, which is 19:31Z. The 5-minute samples
+   carry the same labels. Publication (`received_at`) is a separate field,
+   2–3 minutes later.
+2. **Kalshi/Synoptic would not have been fine for these events.** The
+   decisive repricing started 21 s (Aug 29) and 53 s (Aug 30) after the
+   sensor minute and was complete about 1–1.5 min before the 1-minute feed
+   delivered the reading.
+3. **The first movers had the one-minute observation at voice-line speed.**
+   No METAR or SPECI was issued near either minute. The 5-minute feed never
+   showed the Aug 29 value. The only public outlets carrying the 1-minute
+   OMO that fast are the ASOS voice outlets; KLAX's is the phone. A non-public
+   FAA data path (e.g. CSS-Wx OMO) can't be ruled out from this data. The
+   variable lag (21 s vs 53 s) fits listening to a looping voice message
+   better than a fixed-latency data feed.
+   - Caveat: 19:31:21 is ~2 s earlier than the ASOS guide's nominal "OMO
+     available at M+23 s". So either the voice outlet updates a little
+     sooner than that 1998 figure, or the station clock is offset by a few
+     seconds.
+4. **DSM/CLI "time of max" appears to be the *last* minute the max held.** On
+   Aug 30, 29 °C held 18:12–18:18. Since the official max is 84, every one of
+   those minutes was 84 °F, yet the reported time is 10:18 LST (18:18Z).
+5. **Precision:** 31 °C → {87, 88} °F, floor 87; 29 °C → {84, 85}, floor
+   84. In both cases the floor was enough to kill the bucket below, which is
+   why the market could act on a whole-°C voice reading.
+
+**Implication for Mercury:** for single-minute peaks at OMO-mode stations,
+competing requires the voice line (or a proven sub-30 s data path). The free
+Kalshi batch is the continuous fallback, and it still beats MADIS polling by
+an order of magnitude.
 
 ---
 
@@ -516,7 +590,9 @@ Design rules:
    phl-delaware-valley, la-coastal and chicago once a second during the
    batch window (≈:10–:40 s past each minute). Emit `omo_floor` events from
    the KMIA1M, KPHL1M, KLAX1M and KMDW1M readings, `pending` included.
-   That replaces the 9–20 min MADIS path with ≈M+2:17 at zero cost. Send the
+   That replaces the 9–20 min MADIS path with ≈M+2:17 at zero cost. Per §1B
+   this is a fallback layer: it arrives after the first movers on
+   single-minute peaks. Send the
    requests authenticated so they count against a published budget (Basic
    tier: 200 read tokens/s, 10 per request); limits for keyless calls aren't
    published.
