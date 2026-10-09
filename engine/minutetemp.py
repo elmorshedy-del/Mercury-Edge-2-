@@ -74,7 +74,8 @@ def decode_latest(payload: dict, icao: str, lst_offset_h: int, seen: datetime):
     # possible true F; flooring cannot overstate an observed whole-F maximum.
     return ProofEvent(icao, (observed + timedelta(hours=lst_offset_h)).date(),
                       math.floor(minimum), "omo_floor", observed, seen,
-                      detail=f"minutetemp-rest lower={minimum:.2f}F obs={observed.isoformat()}")
+                      detail=f"minutetemp-rest lower={minimum:.2f}F obs={observed.isoformat()}",
+                      source="minutetemp-rest")
 
 
 class MinuteTempFeed:
@@ -176,7 +177,8 @@ class MinuteTempStream:
                 self._seen = {key}
             ev = ProofEvent(
                 ev.station, ev.climate_date, ev.level_f, ev.channel,
-                ev.obs_ts, ev.seen_ts, ev.detail.replace("minutetemp-rest", "minutetemp-ws"))
+                ev.obs_ts, ev.seen_ts, ev.detail.replace("minutetemp-rest", "minutetemp-ws"),
+                source="minutetemp-ws")
             self.out_queue.put_nowait(ev)
         except Exception as exc:
             if type(exc).__name__ != "Full":
