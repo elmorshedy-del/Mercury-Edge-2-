@@ -14,7 +14,9 @@ Stations in scope (from `engine/config.json`): KNYC, KDEN, KPHL, KMDW, KAUS, KMI
 1. **The voice outlets are the only public path that delivers the 1-minute
    observation in tens of seconds.** Every machine-readable 1-minute feed
    (FAA → MADIS → Synoptic/vendors) currently arrives **~2–5 min** after the
-   observation. Nothing public delivers it in single-digit seconds.
+   observation. Polling the public MADIS HTTP files, as `OMOFeed` does,
+   measured **9–20 min** in a test here (§7). Nothing public delivers it in
+   single-digit seconds.
 2. **The voice message is whole °C, the same precision as the OMO wire.**
    The ASOS guide's own examples read "TEMPERATURE TWO ZERO CELSIUS". The phone
    wins on latency, not precision. Exact whole-°F values still only come from
@@ -234,8 +236,9 @@ Implications (not investigated further here):
   KDEN, KPHL, KMDW, KAUS, KMIA, KLAX, KLGA, KJFK and KEWR are present. **KNYC
   is absent.** The repo's `config.json` marks KDEN `"omo": false`; that is now
   stale.
-- **Measured file freshness (public HTTP):** see §7. The 1-minute set is
-  available through MADIS's other distribution methods (not LDM).
+- **Measured file freshness (public HTTP):** 9–20 min in a 15-minute test
+  (§7). The full 1-minute set is offered through MADIS's other distribution
+  methods (not LDM), and vendors get it in 2–5 min.
 - **Reliability:** "experimental". Synoptic reports the source was **down from
   Oct 2023 to Jan 2026**.
 
@@ -294,7 +297,7 @@ counts the seven stations.
 | 1 | ASOS phone (Twilio) | OMO voice (or METAR at towered sites in LTO mode) | whole °C | **~30–90 s** when connected | Low–medium: single line, busy at peaks, ~90 s cutoff | 7/7 (KNYC OMO guaranteed; 6 towered = check mode) | ~$0.01–0.02/min telephony | Done |
 | 2 | ASOS VHF + SDR | same as phone | whole °C | ~30–60 s | High where it exists | **0/7** | ~$100–300 per site + host | Medium |
 | 3 | FAA CSS-Wx OMO (SWIM) | OMO XML | likely whole °C (verify) | **unknown — measure**; plausibly < MADIS | FAA ops system; SCDS has no 24/7 support | ≤6/7 (KNYC likely absent; verify) | Free | Medium |
-| 4 | MADIS public / Synoptic 1M / Wethr OMO | OMO | whole °C | ~2–5 min (Wethr median 2m25s) | Medium–low: "experimental", 27-month outage 2023–26 | 6/7 (no KNYC) | Free / paid | Low (already built) |
+| 4 | MADIS public / Synoptic 1M / Wethr OMO | OMO | whole °C | ~2–5 min via vendors (Wethr median 2m25s); **9–20 min measured on the public MADIS HTTP files** (§7) | Medium–low: "experimental", 27-month outage 2023–26 | 6/7 (no KNYC) | Free / paid | Low (already built) |
 | 5 | NWWS-OI (+PID201) | METAR/SPECI, DSM, CLI | **exact °F** (T-group, DSM) | seconds after NWS issuance; METAR ≈1–2 min after obs | High with dual ingest | 7/7 | Free | Low (adapter exists) |
 | 6 | FAA CSS-Wx METAR/SPECI | METAR | exact °F (T-group) | unknown; upstream of NWSTG | as #3 | 6–7/7 | Free | Medium (shared with #3) |
 | 7 | D-ATIS (atis.info) | METAR inside ATIS | exact °F (T-group) | controller-dependent; unmeasured | Medium (third-party API) | 6/7 | Free | Low |
@@ -350,13 +353,24 @@ Design rules:
 
 - **Kalshi settlement sources:** verified via public API (§3).
 - **MADIS public 1-minute/5-minute file** (2026-10-09, ~15 min of 20 s
-  polling, `scratchpad` script). Interim result after the first 5 minutes: at
-  receipt, the newest observation in the file was **~9–15 min old**. At
-  15:24:04Z the newest KMIA/KAUS sample was 15:15 and KDEN's was 15:10. The
-  `Last-Modified` header alternated between two values (15:16:14 and 15:21:32),
-  i.e. load-balanced mirrors serving different file versions. Polling the
-  public files is therefore materially slower than the 2–3 min that Wethr and
-  Synoptic report for their feeds.
+  polling, 15:20–15:36Z, KDEN/KMIA/KAUS):
+  | File `Last-Modified` | First seen | Newest sample in file | Age of newest sample at receipt |
+  |---|---|---|---|
+  | 15:16:14 | 15:20:36 | 15:05 (KDEN 15:00) | 15–20 min |
+  | 15:16:14 / 15:21:32 | 15:24:04 | 15:15 (KDEN 15:10) | 9–14 min |
+  | 15:26:44 | 15:27:31 | 15:15 (KDEN 15:10) | 12–17 min |
+  | 15:32:12 | 15:32:20 | 15:15 | 17 min |
+
+  The file is rewritten roughly every 5 min, as MADIS documents. Newly arrived
+  samples lag well behind, though: the 15:20 and 15:25 samples had not appeared
+  by 15:33. `Last-Modified` also alternated between two values on successive
+  requests, which suggests load-balanced mirrors serving different versions.
+  **Polling the public HTTP files gave 9–20 min latency in this window**, far
+  worse than the 2–3 min that Wethr and Synoptic report for their own OMO
+  feeds and the 2.3 min this repo measured earlier. This is a single
+  15-minute sample, so treat it as a warning, not a rate. Before trusting
+  `OMOFeed`, log `seen_ts − obs_ts` for a week. If it looks like this, take the
+  OMO layer from a push source (Synoptic 1M, CSS-Wx) instead.
 - **Station coverage of the OMO wire:** KNYC absent; the other six present
   (§4.6).
 - **D-ATIS content:** KDEN D-ATIS carries the T-group (§4.3).
