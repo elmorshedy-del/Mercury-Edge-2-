@@ -3,6 +3,9 @@ import os,sys,unittest
 from datetime import datetime,timezone
 sys.path.insert(0,os.path.dirname(__file__))
 from nwws_extract import extract_evidence,tgftp_url
+from nwws_tgftp import infer_issue_stamp,AWIPS_IDS
+from nwws_oi_race import RaceRecorder
+import tempfile,json
 
 
 def event(awips,ttaa,raw,issue="2026-10-09T06:32:00Z"):
@@ -103,6 +106,58 @@ class ClimateExtraction(unittest.TestCase):
             "https://tgftp.nws.noaa.gov/data/raw/cx/cxus41.kokx.dsmnyc.txt"
         ) if False else self.assertEqual(tgftp_url("DSMNYC"),
             "https://tgftp.nws.noaa.gov/data/raw/cx/cxus41.kokx.dsmnyc.txt")
+
+    def test_wmo_month_and_year_boundary(self):
+        dt=datetime(2027,1,1,0,2,tzinfo=timezone.utc)
+        self.assertEqual(infer_issue_stamp("CXUS41 KOKX 312355\nDSMNYC",dt),
+                         datetime(2026,12,31,23,55,tzinfo=timezone.utc))
+
+    def test_exact_14_target_products(self):
+        self.assertEqual(len(AWIPS_IDS),14)
+        self.assertEqual(len(set(AWIPS_IDS)),14)
+
+    def test_real_live_pair_measures_advantage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r=RaceRecorder(folder)
+            a=extract_evidence(event("DSMNYC","CXUS41",NYC_DSM,
+                                     "2026-10-08T20:44:00Z"))
+            b=dict(a)
+            a["first_seen_utc"]="2026-10-08T20:44:14.869Z"
+            b["first_seen_utc"]="2026-10-08T20:44:47.000Z"
+            r.observe_race("NWWS",a)
+            r.observe_race("TGFTP",b)
+            self.assertEqual(len(r.completed_pairs),1)
+            import glob
+            f=glob.glob(folder+"/nwws-tgftp-matches-*")
+            self.assertEqual(len(f),1)
+            with open(f[0]) as data:
+                result=json.loads(data.read())
+            self.assertEqual(result["fair_live_race"],True)
+            self.assertAlmostEqual(result["delta_tgftp_minus_nwws_s"],32.131)
+            self.assertTrue(result["same_max"])
+
+    def test_initial_ftp_snapshot_not_counted_as_race(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r=RaceRecorder(folder)
+            a=extract_evidence(event("DSMNYC","CXUS41",NYC_DSM,
+                                     "2026-10-08T20:44:00Z"))
+            r.observe_race("TGFTP",a,bootstrap=True)
+            b=dict(a)
+            b["first_seen_utc"]="2026-10-09T02:00:00Z"
+            r.observe_race("NWWS",b)
+            import glob
+            with open(glob.glob(folder+"/nwws-tgftp-matches-*")[0]) as f:
+                result=json.loads(f.read())
+            self.assertFalse(result["fair_live_race"])
+
+    def test_prior_raw_archive_can_be_reprocessed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r=RaceRecorder(folder)
+            source=event("CLINYC","CDUS41",NYC_CLI)
+            source["product_type"]="CLI"
+            with open(os.path.join(folder,"nwws-oi-first-seen-20261009.jsonl"),"w") as f:
+                f.write(json.dumps(source)+"\n")
+            r.backfill_archived_climate() # fails closed on corrupt/archive gaps
 
     def test_unrelated_product_is_not_evidence(self):
         o=extract_evidence(event("SYNBOU","NZUS99","KDEN 091153Z 15/02"))
