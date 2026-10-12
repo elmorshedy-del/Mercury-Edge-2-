@@ -184,7 +184,9 @@ class MinuteTempTests(unittest.TestCase):
             chosen = stream._slugs()
         self.assertEqual(len(chosen), 5)
         self.assertIn("den", chosen)
-        self.assertNotIn("la", chosen)
+        self.assertIn("nyc", chosen)
+        self.assertIn("la", chosen)
+        self.assertNotIn("mia", chosen)  # MIA keeps REST; KLAX DSM gets priority
         self.assertEqual(len(set(chosen)), len(chosen))
 
     def test_websocket_event_deduplicates_preliminary_committed(self):
