@@ -182,11 +182,10 @@ class MinuteTempStream:
             headers={"X-API-Key": self.api_key, "User-Agent": "MercuryEdge2/1.0"})
         with urllib.request.urlopen(req, timeout=8) as response:
             payload = json.loads(response.read(200000))
-        # Request KLAX first for the DSM race, while retaining the previous
-        # five Mercury subscriptions. The existing separate KLAX shadow may
-        # consume an account slot; the subscribe ACK logs any rejection.
-        # Do not modify or disconnect that independent shadow.
-        want = ["KLAX", "KDEN", "KNYC", "KPHL", "KAUS", "KMIA", "KMDW"]
+        # Reserve the sixth subscription for the independent KLAX shadow.
+        # Prioritize KLAX and KNYC DSM push in Mercury's five slots.
+        # MIA and MDW retain independent REST / other feed coverage.
+        want = ["KLAX", "KNYC", "KDEN", "KPHL", "KAUS", "KMIA", "KMDW"]
         found = {}
         for city in payload.get("data", []):
             slug = city.get("slug")
@@ -194,8 +193,8 @@ class MinuteTempStream:
                 sid = station.get("station_id")
                 if sid in self.station_offsets and slug:
                     found[sid] = slug
-        # Cap at six requests; provider chooses accepted/rejected using account limit.
-        selected = list(dict.fromkeys(found[s] for s in want if s in found))[:6]
+        # Hard cap: five Mercury subscriptions, one reserved for shadow.
+        selected = list(dict.fromkeys(found[s] for s in want if s in found))[:5]
         log.info("minuteTemp WS allocation: %d active city subscriptions", len(selected))
         return selected
 
