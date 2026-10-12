@@ -9,7 +9,7 @@ ROOT=os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0,os.path.join(ROOT,"engine"))
 from proof_bridge import InvalidProof,signature,verify_and_decode
 from feeds import ProofEvent
-from minutetemp import decode_latest, MinuteTempStream
+from minutetemp import decode_latest, decode_dsm_station_report, MinuteTempStream
 from strategy import KillEngine,CityState
 from market import Bucket
 
@@ -114,6 +114,36 @@ class SourceProofTests(unittest.TestCase):
         self.assertEqual(ev.channel,"omo_floor")
         self.assertEqual(ev.source,"minutetemp-ws")
         self.assertEqual(ev.level_f,79)
+
+    def test_minutetemp_dsm_report_matches_klax_oct11_74f(self):
+        seen = datetime(2026, 10, 11, 22, 8, 13, tzinfo=timezone.utc)
+        report = {
+            "type": "station_report",
+            "station_id": "KLAX",
+            "report_type": "dsm",
+            "report_date": "2026-10-11",
+            "max_temp_f": 74,
+            "max_temp_time_utc": "2026-10-11T08:02:00Z",
+            "issuance_time": "2026-10-11T22:00:00Z",
+            "wmo_emit_time": "2026-10-11T22:07:00Z",
+            "live_published_at": "2026-10-11T22:08:12.061Z",
+            "report_id": "6aadf77f-4490-53cb-acd8-ca90dce85c33",
+            "report_revision": 1
+        }
+        event = decode_dsm_station_report(report, {"KLAX": -8}, seen)
+        self.assertIsNotNone(event)
+        self.assertEqual((event.station, event.level_f, event.channel, event.source),
+                         ("KLAX", 74, "dsm", "minutetemp-ws"))
+        self.assertEqual(event.obs_ts.isoformat(), "2026-10-11T08:02:00+00:00")
+        self.assertEqual(str(event.climate_date), "2026-10-11")
+        self.assertIsNone(decode_dsm_station_report(
+            dict(report, report_date="2026-10-10"), {"KLAX": -8}, seen))
+        self.assertIsNone(decode_dsm_station_report(
+            dict(report, max_temp_f=74.5), {"KLAX": -8}, seen))
+        self.assertIsNone(decode_dsm_station_report(
+            dict(report, station_id="KNYC"), {"KLAX": -8}, seen))
+        self.assertIsNone(decode_dsm_station_report(
+            dict(report, report_type="metar_6hr"), {"KLAX": -8}, seen))
 
     def test_engine_never_branches_on_provider(self):
         day=NOW.date()
