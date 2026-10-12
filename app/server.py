@@ -273,3 +273,53 @@ def index():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# Read-only, narrowly-scoped minuteTemp DSM provenance diagnostic.
+# Does not alter proof/trading state and never returns the vendor API key.
+_mt_dsm_cache = {"next_at": 0.0, "result": None}
+
+@app.get("/api/research/minutetemp-dsm-20261011")
+def api_mt_dsm_probe():
+    import urllib.request
+    import urllib.error
+    from urllib.parse import quote
+    now_s = time.monotonic()
+    if _mt_dsm_cache["result"] is not None and now_s < _mt_dsm_cache["next_at"]:
+        return _mt_dsm_cache["result"]
+    key = os.environ.get("MT_KEY")
+    if not key:
+        return {"status": "not_configured"}
+    base = "https://api.minutetemp.com/api/v1/stations"
+    results = []
+    # Exactly six GETs max per 10 minutes for a fixed date and two stations.
+    suffixes = [
+        "/reports/history?start=2026-10-11&end=2026-10-11",
+        "/reports?type=dsm&date=2026-10-11",
+        "/reports/latest"
+    ]
+    for station in ("KLAX", "KNYC"):
+        for suffix in suffixes:
+            req = urllib.request.Request(base + "/" + station + suffix,
+                  headers={"X-API-Key": key, "User-Agent": "MercuryEdge2/DSM-audit"})
+            try:
+                with urllib.request.urlopen(req, timeout=6) as res:
+                    payload = json.loads(res.read(150000))
+                    row = {"station": station, "path": suffix, "http_status": res.status}
+                    data = payload.get("data", payload) if isinstance(payload, dict) else payload
+                    # Return bounded response shape for an audit, without credentials.
+                    sample = json.dumps(data, default=str)
+                    row["body"] = sample[:11000]
+                    row["truncated"] = len(sample) > 11000
+                    results.append(row)
+            except urllib.error.HTTPError as exc:
+                results.append({"station": station, "path": suffix,
+                                "http_status": exc.code})
+            except Exception as exc:
+                results.append({"station": station, "path": suffix,
+                                "error_type": type(exc).__name__})
+    output = {"checked_at": datetime.now(timezone.utc).isoformat(),
+              "kind": "read_only_minutetemp_dsm_audit",
+              "results": results}
+    _mt_dsm_cache.update(next_at=time.monotonic()+600, result=output)
+    return output
