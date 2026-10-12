@@ -11,7 +11,7 @@ import logging
 import math
 import os
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date as Date, datetime, timedelta, timezone
 
 from feeds import ProofEvent
 
@@ -78,6 +78,51 @@ def decode_latest(payload: dict, icao: str, lst_offset_h: int, seen: datetime):
                       source="minutetemp-rest")
 
 
+
+def decode_dsm_station_report(msg: dict, offsets: dict[str, int], seen: datetime):
+    """Only accept fresh, whole-F, exact-station same-day DSM official reports.
+
+    Important: this is the vendor's *reported* maximum, not an observation
+    precision envelope. Decode into the existing provider-agnostic DSM channel.
+    """
+    if msg.get("type") != "station_report" or msg.get("report_type") != "dsm":
+        return None
+    station = msg.get("station_id")
+    if station not in offsets:
+        return None
+    try:
+        climate_date = Date.fromisoformat(msg.get("report_date", ""))
+    except (TypeError, ValueError):
+        return None
+    offset = offsets[station]
+    if climate_date != (seen + timedelta(hours=offset)).date():
+        return None
+    issued = _parse_time(msg.get("wmo_emit_time") or msg.get("issuance_time"))
+    observed = _parse_time(msg.get("max_temp_time_utc"))
+    if issued is None or observed is None:
+        return None
+    if not (-120 <= (seen - issued).total_seconds() <= 3600):
+        return None
+    if observed > seen + timedelta(minutes=2):
+        return None
+    if (observed + timedelta(hours=offset)).date() != climate_date:
+        return None
+    value = msg.get("max_temp_f")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or not (-40 <= value <= 135):
+        return None
+    if abs(value - round(value)) > 0.000001:
+        return None
+    report_key = str(msg.get("report_id") or "")[:70]
+    published = str(msg.get("live_published_at") or "")[:40]
+    detail = (f"minutetemp-ws DSM {station} report={report_key} "
+              f"issued={issued.isoformat()} published={published} "
+              f"max={int(round(value))}F")
+    return ProofEvent(station, climate_date, int(round(value)), "dsm",
+                      observed, seen, detail=detail, source="minutetemp-ws")
+
+
 class MinuteTempFeed:
     def __init__(self, icao: str, lst_offset_h: int, api_key: str):
         self.icao = icao
@@ -137,12 +182,11 @@ class MinuteTempStream:
             headers={"X-API-Key": self.api_key, "User-Agent": "MercuryEdge2/1.0"})
         with urllib.request.urlopen(req, timeout=8) as response:
             payload = json.loads(response.read(200000))
-        # Starter limits ALL concurrent WS subscriptions to six. The existing
-        # independent KLAX race probe keeps one "la" subscription. Reserve
-        # five for Mercury, without disconnecting or editing any shadow.
-        # Prioritize KDEN (known AWC timeouts) and stations without reliable
-        # MADIS coverage. KLAX remains on D-ATIS/TGFTP/REST in Mercury.
-        want = ["KDEN", "KNYC", "KPHL", "KAUS", "KMIA", "KMDW"]
+        # Request KLAX first for the DSM race, while retaining the previous
+        # five Mercury subscriptions. The existing separate KLAX shadow may
+        # consume an account slot; the subscribe ACK logs any rejection.
+        # Do not modify or disconnect that independent shadow.
+        want = ["KLAX", "KDEN", "KNYC", "KPHL", "KAUS", "KMIA", "KMDW"]
         found = {}
         for city in payload.get("data", []):
             slug = city.get("slug")
@@ -150,14 +194,37 @@ class MinuteTempStream:
                 sid = station.get("station_id")
                 if sid in self.station_offsets and slug:
                     found[sid] = slug
-        # Account-wide cap, minus one already reserved for shadow KLAX.
-        selected = list(dict.fromkeys(found[s] for s in want if s in found))[:5]
+        # Cap at six requests; provider chooses accepted/rejected using account limit.
+        selected = list(dict.fromkeys(found[s] for s in want if s in found))[:6]
         log.info("minuteTemp WS allocation: %d active city subscriptions", len(selected))
         return selected
 
     def _on_message(self, raw):
         try:
             msg = json.loads(raw)
+            if msg.get("type") == "subscribed":
+                accepted = msg.get("accepted", {})
+                rejected = msg.get("rejected", [])
+                log.warning("minuteTemp WS subscription response accepted=%s rejected=%s",
+                            json.dumps(accepted)[:500], json.dumps(rejected)[:500])
+                return
+            if msg.get("type") == "station_report":
+                ev = decode_dsm_station_report(
+                    msg, self.station_offsets, datetime.now(timezone.utc))
+                if ev is None:
+                    return
+                key = ("dsm", ev.station, msg.get("report_id"),
+                       msg.get("report_revision"), ev.level_f)
+                if key in self._seen:
+                    return
+                self._seen.add(key)
+                if len(self._seen) > 5000:
+                    self._seen = {key}
+                self.out_queue.put_nowait(ev)
+                log.info("minuteTemp DSM queued station=%s max=%sF issued=%s seen=%s",
+                         ev.station, ev.level_f, msg.get("wmo_emit_time"),
+                         ev.seen_ts.isoformat())
+                return
             if msg.get("type") != "observation":
                 return
             station = msg.get("station_id")
